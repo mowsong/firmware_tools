@@ -2,55 +2,48 @@
 
 block_cipher = None
 
-a = Analysis(
+# ── hex_viewer ────────────────────────────────────────────────────────────────
+a_viewer = Analysis(
     ['hex_viewer.py'],
-    pathex=['e:\\xboot\\mhwisp\\wx_test'],
+    pathex=[],
     binaries=[],
-    datas=[
-        ('hex_viewer.ico', '.'),  # runtime icon file for os.path.dirname(__file__)
-    ],
-    hiddenimports=[],
+    datas=[('icons', 'icons')],
+    hiddenimports=['intelhex', 'wx', 'wx.stc'],
     hookspath=[],
-    hooksconfig={},
     runtime_hooks=[],
-    excludes=[
-        # Common unused stacks to keep output smaller
-        'tkinter',
-        'unittest',
-        'test',
-        'pytest',
-        'numpy',
-        'pandas',
-        'scipy',
-        'matplotlib',
-        'IPython',
-        'jupyter',
-        'notebook',
-    ],
-    noarchive=False,
-    optimize=0,
+    excludes=[],
+    cipher=block_cipher,
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz_viewer = PYZ(a_viewer.pure, a_viewer.zipped_data, cipher=block_cipher)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
+exe_viewer = EXE(
+    pyz_viewer, a_viewer.scripts, a_viewer.binaries, a_viewer.zipfiles, a_viewer.datas, [],
     name='hex_viewer',
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
+    debug=False, strip=False, upx=True, console=False, upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,  # GUI app
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon='hex_viewer.ico',
+    icon='icons/hex_viewer.ico',
+)
+
+# ── hex_diff_tool ─────────────────────────────────────────────────────────────
+a_diff = Analysis(
+    ['hex_diff_tool.py'],
+    pathex=[],
+    binaries=[],
+    datas=[('icons', 'icons')],
+    hiddenimports=['intelhex', 'wx', 'wx.stc'],
+    hookspath=[],
+    runtime_hooks=[],
+    excludes=[],
+    cipher=block_cipher,
+)
+
+pyz_diff = PYZ(a_diff.pure, a_diff.zipped_data, cipher=block_cipher)
+
+exe_diff = EXE(
+    pyz_diff, a_diff.scripts, a_diff.binaries, a_diff.zipfiles, a_diff.datas, [],
+    name='hex_diff_tool',
+    debug=False, strip=False, upx=True, console=False, upx_exclude=[],
+    runtime_tmpdir=None,
+    icon='icons/hex_diff_tool.ico',
 )

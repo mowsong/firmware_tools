@@ -115,10 +115,45 @@ class DiffMarkerStrip(wx.Panel):
             dc.DrawRectangle(0, y, width, max(3, height // self.total_lines or 3))
 
 
+class DiffFileDropTarget(wx.FileDropTarget):
+    def __init__(self, frame: "DiffFrame", side: str | None = None):
+        super().__init__()
+        self.frame = frame
+        self.side = side  # "LEFT", "RIGHT", or None (auto)
+
+    def OnDropFiles(self, x, y, filenames):
+        if not filenames:
+            return False
+
+        try:
+            if self.side in ("LEFT", "RIGHT"):
+                self.frame._load_into_side(filenames[0], self.side)
+                return True
+
+            # Auto mode (drop on frame/background):
+            if len(filenames) >= 2:
+                self.frame._load_into_side(filenames[0], "LEFT")
+                self.frame._load_into_side(filenames[1], "RIGHT")
+            else:
+                if not self.frame.left_path:
+                    self.frame._load_into_side(filenames[0], "LEFT")
+                else:
+                    self.frame._load_into_side(filenames[0], "RIGHT")
+            return True
+        except RuntimeError as e:
+            wx.MessageBox(str(e), "Load Error", wx.OK | wx.ICON_ERROR)
+            return False
+
+
 class DiffFrame(wx.Frame):
     
     def __init__(self):
         super().__init__(None, title="HEX/BIN Byte Diff", size=(1620, 880))
+
+        # App window icon
+        app_ico = os.path.join(ICON_DIR, "hex_diff_tool.ico")
+        if os.path.exists(app_ico):
+            self.SetIcon(wx.Icon(app_ico, wx.BITMAP_TYPE_ICO))
 
         self.left_path = ""
         self.right_path = ""
@@ -218,6 +253,12 @@ class DiffFrame(wx.Frame):
 
         self.left_view.Bind(stc.EVT_STC_UPDATEUI,  self._on_left_update_ui)
         self.right_view.Bind(stc.EVT_STC_UPDATEUI, self._on_right_update_ui)
+
+        # Drag & drop
+        self.left_view.SetDropTarget(DiffFileDropTarget(self, "LEFT"))
+        self.right_view.SetDropTarget(DiffFileDropTarget(self, "RIGHT"))
+        panel.SetDropTarget(DiffFileDropTarget(self, None))
+        self.SetDropTarget(DiffFileDropTarget(self, None))
 
         pane_sizer.Add(self.splitter, 1, wx.EXPAND)
         pane_container.SetSizer(pane_sizer)
@@ -502,6 +543,38 @@ class DiffFrame(wx.Frame):
         self.btn_next_diff.Enable(enabled)
         self.btn_last_diff.Enable(enabled)
 
+
+    def _load_into_side(self, path: str, side: str):
+        mem = load_path(self, path, side)
+        if side == "LEFT":
+            self.left_mem = mem
+            self.left_path = path
+            self.lbl_left.SetLabel(f"LEFT:  {os.path.basename(path)}")
+        else:
+            self.right_mem = mem
+            self.right_path = path
+            self.lbl_right.SetLabel(f"RIGHT: {os.path.basename(path)}")
+        self.refresh_views()
+
+    # ── open handlers ────────────────────────────────────────────────────────
+    def on_open_left(self, _evt):
+        path = self._pick_path("Select LEFT file")
+        if not path:
+            return
+        try:
+            self._load_into_side(path, "LEFT")
+        except RuntimeError as e:
+            wx.MessageBox(str(e), "Load Error", wx.OK | wx.ICON_ERROR)
+
+    def on_open_right(self, _evt):
+        path = self._pick_path("Select RIGHT file")
+        if not path:
+            return
+        try:
+            self._load_into_side(path, "RIGHT")
+        except RuntimeError as e:
+            wx.MessageBox(str(e), "Load Error", wx.OK | wx.ICON_ERROR)
+
     # ── scroll sync ──────────────────────────────────────────────────────────
     def _sync_to_other(self, source: stc.StyledTextCtrl, target: stc.StyledTextCtrl):
         if self._syncing_scroll or self._updating_text:
@@ -546,10 +619,7 @@ class DiffFrame(wx.Frame):
         if not path:
             return
         try:
-            self.left_mem  = load_path(self, path, "LEFT")
-            self.left_path = path
-            self.lbl_left.SetLabel(f"LEFT:  {os.path.basename(path)}")
-            self.refresh_views()
+            self._load_into_side(path, "LEFT")
         except RuntimeError as e:
             wx.MessageBox(str(e), "Load Error", wx.OK | wx.ICON_ERROR)
 
@@ -558,10 +628,7 @@ class DiffFrame(wx.Frame):
         if not path:
             return
         try:
-            self.right_mem  = load_path(self, path, "RIGHT")
-            self.right_path = path
-            self.lbl_right.SetLabel(f"RIGHT: {os.path.basename(path)}")
-            self.refresh_views()
+            self._load_into_side(path, "RIGHT")
         except RuntimeError as e:
             wx.MessageBox(str(e), "Load Error", wx.OK | wx.ICON_ERROR)
 

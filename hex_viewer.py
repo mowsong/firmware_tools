@@ -43,7 +43,7 @@ class MainFrame(wx.Frame):
         super().__init__(None, title="Intel HEX Viewer", size=(1100, 700))
 
         # App window icon
-        ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hex_viewer.ico")
+        ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons", "hex_viewer.ico")
         if os.path.exists(ico_path):
             self.SetIcon(wx.Icon(ico_path, wx.BITMAP_TYPE_ICO))
 
