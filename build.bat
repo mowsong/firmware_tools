@@ -1,1 +1,1 @@
-pyinstaller .\hex_viewer.spec --clean
+pyinstaller .\build.spec --clean

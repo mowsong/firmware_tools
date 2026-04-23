@@ -1,0 +1,4 @@
+altgraph==0.17.5
+crcmod==1.7
+intelhex==2.3.0
+wxPython==4.2.5

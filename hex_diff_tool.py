@@ -115,6 +115,159 @@ class DiffMarkerStrip(wx.Panel):
             dc.DrawRectangle(0, y, width, max(3, height // self.total_lines or 3))
 
 
+class DiffMiniMapStrip(wx.Panel):
+    def __init__(self, parent, linked_ctrl: stc.StyledTextCtrl):
+        super().__init__(parent, size=(48, -1))
+        self.linked_ctrl = linked_ctrl
+        self.diff_lines: list[int] = []
+        self.current_line: int | None = None
+        self.total_lines: int = 1
+
+        self._dragging_viewport = False
+        self._drag_anchor_y = 0
+        self._drag_anchor_first_visible = 0
+
+        self.SetMinSize((48, -1))
+        self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
+
+        self.Bind(wx.EVT_PAINT, self.on_paint)
+        self.Bind(wx.EVT_LEFT_DOWN, self.on_left_down)
+        self.Bind(wx.EVT_LEFT_UP, self.on_left_up)
+        self.Bind(wx.EVT_MOTION, self.on_motion)
+        self.Bind(wx.EVT_MOUSEWHEEL, self.on_mouse_wheel)
+        self.Bind(wx.EVT_MOUSE_CAPTURE_LOST, self.on_capture_lost)
+
+    def update_markers(self, diff_lines: list[int], total_lines: int, current_line: int | None = None):
+        self.diff_lines = diff_lines
+        self.total_lines = max(1, total_lines)
+        self.current_line = current_line
+        self.Refresh()
+
+    def _line_to_y(self, line: int, height: int) -> int:
+        return int(line * height / max(1, self.total_lines))
+
+    def _viewport_info(self) -> tuple[int, int, int]:
+        first_visible = max(0, self.linked_ctrl.GetFirstVisibleLine())
+        visible_lines = max(1, self.linked_ctrl.LinesOnScreen())
+        max_first = max(0, self.total_lines - visible_lines)
+        first_visible = min(first_visible, max_first)
+        return first_visible, visible_lines, max_first
+
+    def _viewport_rect(self, height: int) -> tuple[int, int]:
+        first_visible, visible_lines, _ = self._viewport_info()
+        y0 = self._line_to_y(first_visible, height)
+        y1 = self._line_to_y(min(self.total_lines, first_visible + visible_lines), height)
+        h = max(8, y1 - y0)
+        if y0 + h > height:
+            y0 = max(0, height - h)
+        return y0, h
+
+    def _scroll_first_visible(self, first_line: int):
+        _, _, max_first = self._viewport_info()
+        first_line = max(0, min(first_line, max_first))
+        self.linked_ctrl.ScrollToLine(first_line)
+
+    def _jump_to_y(self, y: int, center: bool):
+        _, height = self.GetClientSize()
+        if height <= 0:
+            return
+        line = int(y * self.total_lines / height)
+        line = max(0, min(line, self.total_lines - 1))
+        visible_lines = max(1, self.linked_ctrl.LinesOnScreen())
+        first_line = line - (visible_lines // 2) if center else line
+        self._scroll_first_visible(first_line)
+        self.linked_ctrl.SetFocus()
+
+    def on_left_down(self, evt: wx.MouseEvent):
+        _, height = self.GetClientSize()
+        if height <= 0 or self.total_lines <= 0:
+            return
+
+        y = evt.GetY()
+        vy, vh = self._viewport_rect(height)
+
+        if vy <= y <= (vy + vh):
+            self._dragging_viewport = True
+            self._drag_anchor_y = y
+            self._drag_anchor_first_visible = max(0, self.linked_ctrl.GetFirstVisibleLine())
+            if not self.HasCapture():
+                self.CaptureMouse()
+        else:
+            self._jump_to_y(y, center=True)
+
+        self.Refresh()
+
+    def on_motion(self, evt: wx.MouseEvent):
+        if not self._dragging_viewport or not evt.LeftIsDown():
+            return
+
+        _, height = self.GetClientSize()
+        if height <= 0:
+            return
+
+        dy = evt.GetY() - self._drag_anchor_y
+        delta_lines = int(dy * self.total_lines / height)
+        self._scroll_first_visible(self._drag_anchor_first_visible + delta_lines)
+        self.Refresh()
+
+    def on_left_up(self, _evt: wx.MouseEvent):
+        if self._dragging_viewport:
+            self._dragging_viewport = False
+            if self.HasCapture():
+                self.ReleaseMouse()
+            self.Refresh()
+
+    def on_capture_lost(self, _evt: wx.MouseCaptureLostEvent):
+        self._dragging_viewport = False
+
+    def on_mouse_wheel(self, evt: wx.MouseEvent):
+        rot = evt.GetWheelRotation()
+        delta = evt.GetWheelDelta() or 120
+        steps = int(rot / delta)
+        if steps == 0:
+            return
+
+        lines_per = max(1, evt.GetLinesPerAction())
+        cur_first = max(0, self.linked_ctrl.GetFirstVisibleLine())
+        self._scroll_first_visible(cur_first - steps * lines_per)
+        self.Refresh()
+
+    def on_paint(self, _evt):
+        dc = wx.AutoBufferedPaintDC(self)
+        width, height = self.GetClientSize()
+
+        dc.SetBackground(wx.Brush(wx.Colour(245, 245, 245)))
+        dc.Clear()
+
+        if width <= 0 or height <= 0 or self.total_lines <= 0:
+            return
+
+        lane_x = 8
+        lane_w = max(4, width - 16)
+        dc.SetPen(wx.TRANSPARENT_PEN)
+        dc.SetBrush(wx.Brush(wx.Colour(220, 220, 220)))
+        dc.DrawRectangle(lane_x, 0, lane_w, height)
+
+        dc.SetBrush(wx.Brush(wx.Colour(220, 0, 0)))
+        for line in self.diff_lines:
+            y0 = self._line_to_y(line, height)
+            y1 = self._line_to_y(line + 1, height)
+            h = max(1, y1 - y0)
+            dc.DrawRectangle(lane_x, y0, lane_w, h)
+
+        if self.current_line is not None:
+            y0 = self._line_to_y(self.current_line, height)
+            y1 = self._line_to_y(self.current_line + 1, height)
+            h = max(2, y1 - y0)
+            dc.SetBrush(wx.Brush(wx.Colour(0, 120, 215)))
+            dc.DrawRectangle(4, y0, width - 8, h)
+
+        vy0, vh = self._viewport_rect(height)
+        dc.SetBrush(wx.TRANSPARENT_BRUSH)
+        dc.SetPen(wx.Pen(wx.Colour(0, 120, 215), 1))
+        dc.DrawRectangle(1, vy0, width - 2, vh)
+
+
 class DiffFileDropTarget(wx.FileDropTarget):
     def __init__(self, frame: "DiffFrame", side: str | None = None):
         super().__init__()
@@ -169,7 +322,7 @@ class DiffFrame(wx.Frame):
         panel = wx.Panel(self)
         root = wx.BoxSizer(wx.VERTICAL)
 
-        # ── toolbar ──────────────────────────────────────────────────────────
+        # -- toolbar -----------------------------------------------------------
         toolbar = wx.BoxSizer(wx.HORIZONTAL)
         self.btn_open_left  = wx.Button(panel, label="Open Left...")
         self.btn_open_right = wx.Button(panel, label="Open Right...")
@@ -214,10 +367,11 @@ class DiffFrame(wx.Frame):
 
         root.Add(toolbar, 0, wx.ALL | wx.EXPAND, 8)
 
-        # ── pane labels + splitter ────────────────────────────────────────────
+        # -- pane labels + splitter --------------------------------------------
         pane_container = wx.Panel(panel)
         pane_sizer = wx.BoxSizer(wx.VERTICAL)
 
+        # -- labels ----------------------------------------------------------
         labels = wx.BoxSizer(wx.HORIZONTAL)
         self.lbl_left  = wx.StaticText(pane_container, label="LEFT")
         self.lbl_right = wx.StaticText(pane_container, label="RIGHT")
@@ -235,11 +389,9 @@ class DiffFrame(wx.Frame):
 
         self.left_view   = stc.StyledTextCtrl(self.left_pane)
         self.right_view  = stc.StyledTextCtrl(self.right_pane)
-        self.left_marker_strip  = DiffMarkerStrip(self.left_pane)
-        self.right_marker_strip = DiffMarkerStrip(self.right_pane)
+        self.right_marker_strip = DiffMiniMapStrip(self.right_pane, self.right_view)
 
         left_pane_sizer.Add(self.left_view,  1, wx.EXPAND)
-        left_pane_sizer.Add(self.left_marker_strip,  0, wx.EXPAND)
         right_pane_sizer.Add(self.right_view, 1, wx.EXPAND)
         right_pane_sizer.Add(self.right_marker_strip, 0, wx.EXPAND)
 
@@ -266,12 +418,12 @@ class DiffFrame(wx.Frame):
         root.Add(pane_container, 1, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 8)
         panel.SetSizer(root)
 
-        # ── status bar: single field ─────────────────────────────────────────
+        # -- status bar: single field -----------------------------------------
         self.CreateStatusBar(1)
         self.SetStatusText("Open LEFT and RIGHT files")
         self._update_nav_buttons()
 
-        # ── accelerators ─────────────────────────────────────────────────────
+        # -- accelerators ------------------------------------------------------
         self.ID_NEXT_DIFF = wx.NewIdRef()
         self.ID_PREV_DIFF = wx.NewIdRef()
         accel = wx.AcceleratorTable([
@@ -282,13 +434,39 @@ class DiffFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_next_diff, id=self.ID_NEXT_DIFF)
         self.Bind(wx.EVT_MENU, self.on_prev_diff, id=self.ID_PREV_DIFF)
 
-    # ── status bar helper ────────────────────────────────────────────────────
+        # Global key navigation
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_char_hook)
+
+    # -- status bar helper -----------------------------------------------------
     def _set_status(self, *parts: str):
         """Join non-empty parts with  |  and show in the single status field."""
         text = "  |  ".join(p for p in parts if p)
         self.SetStatusText(text)
+    
+    # Global key handler
+    def _on_char_hook(self, evt: wx.KeyEvent):
+        focused = wx.Window.FindFocus()
+        if isinstance(focused, wx.TextCtrl):
+            evt.Skip()
+            return
+        if evt.GetModifiers() != wx.MOD_NONE:
+            evt.Skip()
+            return
+        key = evt.GetKeyCode()
+        if key in (wx.WXK_DOWN, wx.WXK_RIGHT, wx.WXK_PAGEDOWN):
+            self.on_next_diff(None)
+            return
+        if key in (wx.WXK_UP, wx.WXK_LEFT, wx.WXK_PAGEUP):
+            self.on_prev_diff(None)
+            return
+        evt.Skip()
 
-    # ── STC setup ────────────────────────────────────────────────────────────
+    def _set_status(self, *parts: str):
+        """Join non-empty parts with  |  and show in the single status field."""
+        text = "  |  ".join(p for p in parts if p)
+        self.SetStatusText(text)
+        
+    # -- STC setup -------------------------------------------------------------
     def _setup_stc(self, ctrl: stc.StyledTextCtrl):
         ctrl.SetLexer(stc.STC_LEX_NULL)
         ctrl.StyleClearAll()
@@ -327,7 +505,7 @@ class DiffFrame(wx.Frame):
         except Exception:
             pass
 
-    # ── file picker ──────────────────────────────────────────────────────────
+    # -- file picker -----------------------------------------------------------
     def _pick_path(self, title: str) -> str | None:
         with wx.FileDialog(
             self, title,
@@ -343,7 +521,7 @@ class DiffFrame(wx.Frame):
                 return None
             return dlg.GetPath()
 
-    # ── helpers ──────────────────────────────────────────────────────────────
+    # -- helpers ---------------------------------------------------------------
     @staticmethod
     def _fmt(v: int | None) -> str:
         return ".." if v is None else f"{v:02X}"
@@ -435,16 +613,28 @@ class DiffFrame(wx.Frame):
             return ""
         bases = sorted({a & ~0x0F for a in mem.keys()})
         bases = [b for b in bases if self._row_overlaps_range(b, bounds)]
+
         chunks: list[str] = []
         for base in bases:
-            chunks.append(f"{base:08X}: ")
+            hex_parts: list[str] = []
+            ascii_parts: list[str] = []
             for i in range(16):
-                if i > 0:
-                    chunks.append(" ")
                 a = base + i
-                chunks.append(self._fmt(mem.get(a)) if self._addr_in_range(a, bounds) else "..")
-            chunks.append("\n")
+                in_range = self._addr_in_range(a, bounds)
+                v = mem.get(a)
+                hex_parts.append(self._fmt(v) if in_range else "..")
+                ascii_parts.append(self._byte_to_ascii(v, in_range))
+
+            chunks.append(f"{base:08X}: {' '.join(hex_parts)}  |{''.join(ascii_parts)}|\n")
         return "".join(chunks)
+
+    @staticmethod
+    def _byte_to_ascii(v: int | None, in_range: bool) -> str:
+        if not in_range:
+            return " "
+        if v is None:
+            return "."
+        return chr(v) if 32 <= v <= 126 else "."
 
     def _build_texts_and_spans(
         self, bases: list[int], bounds: tuple[int | None, int | None]
@@ -461,16 +651,17 @@ class DiffFrame(wx.Frame):
             prefix = f"{base:08X}: "
             left_chunks.append(prefix)
             right_chunks.append(prefix)
-            left_pos  += len(prefix)
+            left_pos += len(prefix)
             right_pos += len(prefix)
 
+            # Hex area
             for i in range(16):
-                a  = base + i
+                a = base + i
                 lv = self.left_mem.get(a)
                 rv = self.right_mem.get(a)
 
                 if i > 0:
-                    left_chunks.append(" ");  left_pos  += 1
+                    left_chunks.append(" ");  left_pos += 1
                     right_chunks.append(" "); right_pos += 1
 
                 in_range = self._addr_in_range(a, bounds)
@@ -489,11 +680,35 @@ class DiffFrame(wx.Frame):
                         right_spans.append((right_pos, 2))
                         nav_positions.append((left_pos, right_pos))
 
-                left_pos  += 2
+                left_pos += 2
                 right_pos += 2
 
-            left_chunks.append("\n");  left_pos  += 1
-            right_chunks.append("\n"); right_pos += 1
+            # ASCII area prefix
+            left_chunks.append("  |");  left_pos += 3
+            right_chunks.append("  |"); right_pos += 3
+
+            # ASCII area (also highlight diffs)
+            for i in range(16):
+                a = base + i
+                lv = self.left_mem.get(a)
+                rv = self.right_mem.get(a)
+                in_range = self._addr_in_range(a, bounds)
+
+                lch = self._byte_to_ascii(lv, in_range)
+                rch = self._byte_to_ascii(rv, in_range)
+
+                left_chunks.append(lch)
+                right_chunks.append(rch)
+
+                if in_range and lv != rv and not (lv is None and rv is None):
+                    left_spans.append((left_pos, 1))
+                    right_spans.append((right_pos, 1))
+
+                left_pos += 1
+                right_pos += 1
+
+            left_chunks.append("|\n");  left_pos += 2
+            right_chunks.append("|\n"); right_pos += 2
 
         return (
             "".join(left_chunks), left_spans,
@@ -501,7 +716,7 @@ class DiffFrame(wx.Frame):
             compared, diffs, nav_positions,
         )
 
-    # ── indicator helpers ────────────────────────────────────────────────────
+    # -- indicator helpers -----------------------------------------------------
     def _clear_current_diff_highlight(self):
         for ctrl in (self.left_view, self.right_view):
             ctrl.SetIndicatorCurrent(INDIC_CURRENT_DIFF)
@@ -514,10 +729,9 @@ class DiffFrame(wx.Frame):
         self.right_view.SetIndicatorCurrent(INDIC_CURRENT_DIFF)
         self.right_view.IndicatorFillRange(right_pos, length)
 
-    # ── marker strip ─────────────────────────────────────────────────────────
+    # -- marker strip ----------------------------------------------------------
     def _update_marker_strips(self):
-        left_total  = max(1, self.left_view.GetLineCount())
-        right_total = max(1, self.right_view.GetLineCount())
+        total_lines = max(1, self.left_view.GetLineCount(), self.right_view.GetLineCount())
 
         diff_lines: list[int] = []
         if self.diff_nav_positions:
@@ -533,70 +747,17 @@ class DiffFrame(wx.Frame):
             lpos, _ = self.diff_nav_positions[self.current_diff_idx]
             current_line = self.left_view.LineFromPosition(lpos)
 
-        self.left_marker_strip.update_markers(diff_lines, left_total, current_line)
-        self.right_marker_strip.update_markers(diff_lines, right_total, current_line)
-
-    def _update_nav_buttons(self):
-        enabled = bool(self.left_path and self.right_path and self.diff_nav_positions)
-        self.btn_first_diff.Enable(enabled)
-        self.btn_prev_diff.Enable(enabled)
-        self.btn_next_diff.Enable(enabled)
-        self.btn_last_diff.Enable(enabled)
-
-
-    def _load_into_side(self, path: str, side: str):
-        mem = load_path(self, path, side)
-        if side == "LEFT":
-            self.left_mem = mem
-            self.left_path = path
-            self.lbl_left.SetLabel(f"LEFT:  {os.path.basename(path)}")
-        else:
-            self.right_mem = mem
-            self.right_path = path
-            self.lbl_right.SetLabel(f"RIGHT: {os.path.basename(path)}")
-        self.refresh_views()
-
-    # ── open handlers ────────────────────────────────────────────────────────
-    def on_open_left(self, _evt):
-        path = self._pick_path("Select LEFT file")
-        if not path:
-            return
-        try:
-            self._load_into_side(path, "LEFT")
-        except RuntimeError as e:
-            wx.MessageBox(str(e), "Load Error", wx.OK | wx.ICON_ERROR)
-
-    def on_open_right(self, _evt):
-        path = self._pick_path("Select RIGHT file")
-        if not path:
-            return
-        try:
-            self._load_into_side(path, "RIGHT")
-        except RuntimeError as e:
-            wx.MessageBox(str(e), "Load Error", wx.OK | wx.ICON_ERROR)
-
-    # ── scroll sync ──────────────────────────────────────────────────────────
-    def _sync_to_other(self, source: stc.StyledTextCtrl, target: stc.StyledTextCtrl):
-        if self._syncing_scroll or self._updating_text:
-            return
-        self._syncing_scroll = True
-        try:
-            delta = source.GetFirstVisibleLine() - target.GetFirstVisibleLine()
-            if delta:
-                target.LineScroll(0, delta)
-            src_x = source.GetXOffset()
-            if src_x != target.GetXOffset():
-                target.SetXOffset(src_x)
-        finally:
-            self._syncing_scroll = False
+        self.right_marker_strip.update_markers(diff_lines, total_lines, current_line)
 
     def _on_left_update_ui(self, _evt):
         self._sync_to_other(self.left_view, self.right_view)
+        self.right_marker_strip.Refresh()
 
     def _on_right_update_ui(self, _evt):
         self._sync_to_other(self.right_view, self.left_view)
+        self.right_marker_strip.Refresh()
 
-    # ── apply styled text ────────────────────────────────────────────────────
+    # -- apply styled text -----------------------------------------------------
     def _apply_styled_text(self, ctrl: stc.StyledTextCtrl, text: str, diff_spans: list[tuple[int, int]]):
         ctrl.Freeze()
         try:
@@ -613,7 +774,7 @@ class DiffFrame(wx.Frame):
         finally:
             ctrl.Thaw()
 
-    # ── open handlers ────────────────────────────────────────────────────────
+    # -- open handlers ---------------------------------------------------------
     def on_open_left(self, _evt):
         path = self._pick_path("Select LEFT file")
         if not path:
@@ -635,7 +796,7 @@ class DiffFrame(wx.Frame):
     def on_refresh(self, _evt):
         self.refresh_views()
 
-    # ── navigation ───────────────────────────────────────────────────────────
+    # -- navigation ------------------------------------------------------------
     def _jump_to_diff(self, idx: int):
         if not self.diff_nav_positions:
             return
@@ -657,7 +818,7 @@ class DiffFrame(wx.Frame):
         self._set_status(
             self._format_range_label(self._get_compare_bounds() or (None, None)),
             f"Diff {idx + 1} / {len(self.diff_nav_positions)}",
-            "F7/Shift+F7: next/prev diff",
+            "F7/Shift+F7 or Arrow/PgUp/PgDn: next/prev diff",
         )
 
     def on_first_diff(self, _evt):
@@ -683,7 +844,7 @@ class DiffFrame(wx.Frame):
         else:
             self._jump_to_diff(self.current_diff_idx - 1)
 
-    # ── main refresh ─────────────────────────────────────────────────────────
+    # -- main refresh ----------------------------------------------------------
     def refresh_views(self):
         bounds = self._get_compare_bounds(show_error=True)
         if bounds is None:
@@ -742,13 +903,53 @@ class DiffFrame(wx.Frame):
             self.right_view.ScrollToLine(0); self.right_view.SetXOffset(0)
             self._update_marker_strips()
 
-            nav = "F7/Shift+F7: next/prev diff" if diffs else "No differences"
+            nav = "F7/Shift+F7 or Arrow/PgUp/PgDn: next/prev diff" if diffs else "No differences"
             self._set_status(range_label, f"Rows: {len(bases)}", f"Compared: {compared}", f"Diffs: {diffs}", nav)
 
         finally:
             self._updating_text = False
             self._update_nav_buttons()
+            
+    def _update_nav_buttons(self):
+        has_diffs = bool(self.left_path and self.right_path and self.diff_nav_positions)
+        self.btn_first_diff.Enable(has_diffs)
+        self.btn_prev_diff.Enable(has_diffs)
+        self.btn_next_diff.Enable(has_diffs)
+        self.btn_last_diff.Enable(has_diffs)
+        
+    def _sync_to_other(self, src: stc.StyledTextCtrl, dst: stc.StyledTextCtrl):
+        if self._syncing_scroll or self._updating_text:
+            return
 
+        self._syncing_scroll = True
+        try:
+            src_line = src.GetFirstVisibleLine()
+            dst_line = dst.GetFirstVisibleLine()
+            if dst_line != src_line:
+                dst.ScrollToLine(src_line)
+
+            src_x = src.GetXOffset()
+            dst_x = dst.GetXOffset()
+            if dst_x != src_x:
+                dst.SetXOffset(src_x)
+        finally:
+            self._syncing_scroll = False
+
+    def _load_into_side(self, path: str, side: str):
+        mem = load_path(self, path, side)
+
+        if side == "LEFT":
+            self.left_path = path
+            self.left_mem = mem
+            self.lbl_left.SetLabel(f"LEFT: {path}")
+        elif side == "RIGHT":
+            self.right_path = path
+            self.right_mem = mem
+            self.lbl_right.SetLabel(f"RIGHT: {path}")
+        else:
+            raise RuntimeError(f"Invalid side: {side}")
+
+        self.refresh_views()
 
 class DiffApp(wx.App):
     def OnInit(self):
