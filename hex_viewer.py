@@ -11,6 +11,7 @@ import ctypes
 import wx
 import wx.lib.mixins.listctrl as listmix
 from intelhex import IntelHex, HexRecordError
+from version import __version_viewer__ as __version__
 
 
 PROFILE = False
@@ -40,7 +41,7 @@ class HexFileDropTarget(wx.FileDropTarget):
 
 class MainFrame(wx.Frame):
     def __init__(self):
-        super().__init__(None, title="Intel HEX Viewer", size=(1100, 750))
+        super().__init__(None, title=f"Intel HEX Viewer v{__version__}", size=(1100, 750))
 
         ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons", "hex_viewer.ico")
         if os.path.exists(ico_path):
@@ -57,6 +58,7 @@ class MainFrame(wx.Frame):
         self.file_crc32: int | None = None
         self.block_crc_result: tuple[int, int, int] | None = None  # (start, padded_end, crc)
         self.current_path: str | None = None
+        self.current_bin_offset: int | None = None
 
         # crcmod functions
         self._crc16_fun = crcmod.mkCrcFun(0x11021, initCrc=0, rev=True)
@@ -70,7 +72,11 @@ class MainFrame(wx.Frame):
 
         btn_open = wx.Button(panel, label="Open...")
         btn_open.Bind(wx.EVT_BUTTON, self.on_open)
-        tb1.Add(btn_open, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 16)
+        tb1.Add(btn_open, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+
+        btn_refresh = wx.Button(panel, label="Refresh")
+        btn_refresh.Bind(wx.EVT_BUTTON, self.on_refresh)
+        tb1.Add(btn_refresh, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 16)
 
         tb1.Add(wx.StaticText(panel, label="View as:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
         self.choice_unit = wx.Choice(panel, choices=["1 byte", "2 bytes", "4 bytes"])
@@ -138,6 +144,15 @@ class MainFrame(wx.Frame):
         self.SetStatusText("Open an Intel HEX or BIN file (or drag & drop)")
         self._update_crc_status()
         self._update_block_crc_status()
+
+        # F5 => Refresh
+        self.ID_REFRESH = wx.NewIdRef()
+        self.Bind(wx.EVT_MENU, self.on_refresh, id=self.ID_REFRESH)
+        self.SetAcceleratorTable(
+            wx.AcceleratorTable([
+                wx.AcceleratorEntry(wx.ACCEL_NORMAL, wx.WXK_F5, self.ID_REFRESH),
+            ])
+        )
 
     # -- CRC helpers --
 
@@ -253,6 +268,10 @@ class MainFrame(wx.Frame):
 
     # -- File loading --
 
+    def _compute_file_crc32(self, path: str) -> int:
+        with open(path, "rb") as f:
+            return self._crc32_bytes(f.read())
+
     def _load_hex_file(self, path: str) -> bool:
         try:
             with open(path, "rb") as f:
@@ -266,6 +285,7 @@ class MainFrame(wx.Frame):
             self.file_crc32 = file_crc
             self.data_crc32 = self._calc_data_crc32_from_intelhex(ih)
             self.block_crc_result = None
+            self.current_bin_offset = None
 
             self._profile_call("populate_table", self.populate_table)
             self._autofill_crc_range()
@@ -290,6 +310,7 @@ class MainFrame(wx.Frame):
             self.file_crc32 = self._crc32_bytes(data)
             self.data_crc32 = self._crc32_bytes(data)
             self.block_crc_result = None
+            self.current_bin_offset = offset
 
             self._profile_call("populate_table", self.populate_table)
             self._autofill_crc_range()
@@ -334,6 +355,53 @@ class MainFrame(wx.Frame):
             if dlg.ShowModal() != wx.ID_OK:
                 return
             self.open_path(dlg.GetPath())
+
+    def on_refresh(self, _evt):
+        if not self.current_path:
+            wx.MessageBox("No file loaded.", "Refresh", wx.OK | wx.ICON_INFORMATION)
+            return
+
+        # Flash status so user sees refresh started
+        self.SetStatusText("Refreshing...")
+        self.GetStatusBar().Update()
+
+        try:
+            current_crc = self._compute_file_crc32(self.current_path)
+        except OSError as e:
+            wx.MessageBox(str(e), "Refresh Error", wx.OK | wx.ICON_ERROR)
+            self._set_status_loaded_file()
+            return
+
+        # If raw file bytes are unchanged, skip expensive parse/populate.
+        if self.file_crc32 is not None and current_crc == self.file_crc32:
+            self.SetStatusText(f"No changes: {os.path.basename(self.current_path)}")
+            wx.CallLater(300, self._set_status_loaded_file)
+            return
+
+        ext = os.path.splitext(self.current_path)[1].lower()
+        if ext in (".hex", ".ihex", ".ihx"):
+            if self._load_hex_file(self.current_path):
+                self.SetStatusText(f"Refreshed: {os.path.basename(self.current_path)}")
+                wx.CallLater(300, self._set_status_loaded_file)
+            return
+
+        if ext == ".bin":
+            offset = self.current_bin_offset
+            if offset is None:
+                offset = self._ask_offset()
+                if offset is None:
+                    self._set_status_loaded_file()
+                    return
+            if self._load_bin_file(self.current_path, offset):
+                self.SetStatusText(f"Refreshed: {os.path.basename(self.current_path)}")
+                wx.CallLater(1200, self._set_status_loaded_file)
+            return
+
+        wx.MessageBox(
+            f"Unsupported file type: {ext or '(no extension)'}",
+            "Refresh",
+            wx.OK | wx.ICON_INFORMATION,
+        )
 
     def _ask_offset(self) -> int | None:
         while True:

@@ -3,6 +3,7 @@ import ctypes
 import wx
 import wx.stc as stc
 from intelhex import IntelHex, HexRecordError
+from version import __version_diff__ as __version__
 
 STYLE_NORMAL = 0
 STYLE_DIFF = 1
@@ -45,7 +46,12 @@ def ask_offset(parent: wx.Window, side: str, path: str) -> int | None:
             )
 
 
-def load_path(parent: wx.Window, path: str, side: str) -> dict[int, int]:
+def load_path(
+    parent: wx.Window,
+    path: str,
+    side: str,
+    bin_offset: int | None = None,
+) -> tuple[dict[int, int], int | None]:
     ext = os.path.splitext(path)[1].lower()
 
     if ext in (".hex", ".ihex", ".ihx"):
@@ -54,7 +60,7 @@ def load_path(parent: wx.Window, path: str, side: str) -> dict[int, int]:
             ih.loadhex(path)
         except (OSError, HexRecordError, ValueError) as e:
             raise RuntimeError(f"{side} load failed: {e}") from e
-        return ih.todict()
+        return ih.todict(), None
 
     if ext == ".bin":
         try:
@@ -63,10 +69,10 @@ def load_path(parent: wx.Window, path: str, side: str) -> dict[int, int]:
         except OSError as e:
             raise RuntimeError(f"{side} load failed: {e}") from e
 
-        offset = ask_offset(parent, side, path)
+        offset = bin_offset if bin_offset is not None else ask_offset(parent, side, path)
         if offset is None:
             raise RuntimeError(f"{side} load cancelled")
-        return {offset + i: b for i, b in enumerate(data)}
+        return ({offset + i: b for i, b in enumerate(data)}, offset)
 
     raise RuntimeError(f"{side}: unsupported file type '{ext or '(no extension)'}'")
 
@@ -299,9 +305,8 @@ class DiffFileDropTarget(wx.FileDropTarget):
 
 
 class DiffFrame(wx.Frame):
-    
     def __init__(self):
-        super().__init__(None, title="HEX/BIN Byte Diff", size=(1620, 880))
+        super().__init__(None, title=f"HEX/BIN Byte Diff  v{__version__}", size=(1620, 880))
 
         # App window icon
         app_ico = os.path.join(ICON_DIR, "hex_diff_tool.ico")
@@ -312,6 +317,8 @@ class DiffFrame(wx.Frame):
         self.right_path = ""
         self.left_mem: dict[int, int] = {}
         self.right_mem: dict[int, int] = {}
+        self.left_bin_offset: int | None = None
+        self.right_bin_offset: int | None = None
 
         self._syncing_scroll = False
         self._updating_text = False
@@ -351,7 +358,7 @@ class DiffFrame(wx.Frame):
             self.txt_range_end.SetHint("stop")
 
         toolbar.Add(self.btn_open_left,  0, wx.RIGHT, 8)
-        toolbar.Add(self.btn_open_right, 0, wx.RIGHT, 12)
+        toolbar.Add(self.btn_open_right, 0, wx.RIGHT, 8)
         toolbar.Add(self.chk_only_diff,  0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 12)
         toolbar.Add(wx.StaticText(panel, label="Range [start, stop):"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
         toolbar.Add(wx.StaticText(panel, label="0x"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 2)
@@ -373,10 +380,30 @@ class DiffFrame(wx.Frame):
 
         # -- labels ----------------------------------------------------------
         labels = wx.BoxSizer(wx.HORIZONTAL)
-        self.lbl_left  = wx.StaticText(pane_container, label="LEFT")
+
+        left_hdr = wx.BoxSizer(wx.HORIZONTAL)
+        self.btn_reload_left = wx.Button(pane_container, label="Reload")
+        self.btn_close_left  = wx.Button(pane_container, label="✕", size=(28, -1))
+        self.lbl_left = wx.StaticText(pane_container, label="LEFT")
+        left_hdr.Add(self.btn_reload_left, 0, wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 6)
+        left_hdr.Add(self.btn_close_left,  0, wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 6)
+        left_hdr.Add(self.lbl_left, 0, wx.ALIGN_CENTER_VERTICAL)
+
+        right_hdr = wx.BoxSizer(wx.HORIZONTAL)
+        self.btn_reload_right = wx.Button(pane_container, label="Reload")
+        self.btn_close_right  = wx.Button(pane_container, label="✕", size=(28, -1))
         self.lbl_right = wx.StaticText(pane_container, label="RIGHT")
-        labels.Add(self.lbl_left,  1, wx.LEFT, 4)
-        labels.Add(self.lbl_right, 1, wx.LEFT, 8)
+        right_hdr.Add(self.btn_reload_right, 0, wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 6)
+        right_hdr.Add(self.btn_close_right,  0, wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 6)
+        right_hdr.Add(self.lbl_right, 0, wx.ALIGN_CENTER_VERTICAL)
+
+        self.btn_reload_left.Bind(wx.EVT_BUTTON,  self.on_reload_left)
+        self.btn_reload_right.Bind(wx.EVT_BUTTON, self.on_reload_right)
+        self.btn_close_left.Bind(wx.EVT_BUTTON,   self.on_close_left)
+        self.btn_close_right.Bind(wx.EVT_BUTTON,  self.on_close_right)
+
+        labels.Add(left_hdr, 1, wx.LEFT, 4)
+        labels.Add(right_hdr, 1, wx.LEFT, 8)
         pane_sizer.Add(labels, 0, wx.BOTTOM | wx.EXPAND, 4)
 
         self.splitter = wx.SplitterWindow(pane_container, style=wx.SP_LIVE_UPDATE | wx.SP_3D)
@@ -796,6 +823,42 @@ class DiffFrame(wx.Frame):
     def on_refresh(self, _evt):
         self.refresh_views()
 
+    def on_reload_left(self, _evt):
+        if not self.left_path:
+            wx.MessageBox("No LEFT file loaded.", "Reload Left", wx.OK | wx.ICON_INFORMATION)
+            return
+        try:
+            self._load_into_side(self.left_path, "LEFT")
+        except RuntimeError as e:
+            wx.MessageBox(str(e), "Reload Error", wx.OK | wx.ICON_ERROR)
+
+    def on_reload_right(self, _evt):
+        if not self.right_path:
+            wx.MessageBox("No RIGHT file loaded.", "Reload Right", wx.OK | wx.ICON_INFORMATION)
+            return
+        try:
+            self._load_into_side(self.right_path, "RIGHT")
+        except RuntimeError as e:
+            wx.MessageBox(str(e), "Reload Error", wx.OK | wx.ICON_ERROR)
+
+    def on_close_left(self, _evt):
+        if not self.left_path:
+            return
+        self.left_path = ""
+        self.left_mem = {}
+        self.left_bin_offset = None
+        self.lbl_left.SetLabel("LEFT")
+        self.refresh_views()
+
+    def on_close_right(self, _evt):
+        if not self.right_path:
+            return
+        self.right_path = ""
+        self.right_mem = {}
+        self.right_bin_offset = None
+        self.lbl_right.SetLabel("RIGHT")
+        self.refresh_views()
+
     # -- navigation ------------------------------------------------------------
     def _jump_to_diff(self, idx: int):
         if not self.diff_nav_positions:
@@ -936,20 +999,32 @@ class DiffFrame(wx.Frame):
             self._syncing_scroll = False
 
     def _load_into_side(self, path: str, side: str):
-        mem = load_path(self, path, side)
+        ext = os.path.splitext(path)[1].lower()
+        # Only reuse remembered offset when reloading the same file
+        if ext == ".bin":
+            current_path = self.left_path if side == "LEFT" else self.right_path
+            remembered_offset = (self.left_bin_offset if side == "LEFT" else self.right_bin_offset) if path == current_path else None
+        else:
+            remembered_offset = None
+
+        mem, used_offset = load_path(self, path, side, remembered_offset)
+        ext = os.path.splitext(path)[1].lower()
 
         if side == "LEFT":
             self.left_path = path
             self.left_mem = mem
+            self.left_bin_offset = used_offset if ext == ".bin" else None
             self.lbl_left.SetLabel(f"LEFT: {path}")
         elif side == "RIGHT":
             self.right_path = path
             self.right_mem = mem
+            self.right_bin_offset = used_offset if ext == ".bin" else None
             self.lbl_right.SetLabel(f"RIGHT: {path}")
         else:
             raise RuntimeError(f"Invalid side: {side}")
 
         self.refresh_views()
+
 
 class DiffApp(wx.App):
     def OnInit(self):
