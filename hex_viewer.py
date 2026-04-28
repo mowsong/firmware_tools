@@ -49,6 +49,7 @@ class MainFrame(wx.Frame):
 
         self.ih: IntelHex | None = None
         self.unit_size = 1
+        self.endianness = "little"  # default for multi-byte view
         self.goto_history: list[str] = []
 
         self.mem: dict[int, int] = {}
@@ -78,19 +79,20 @@ class MainFrame(wx.Frame):
         btn_refresh.Bind(wx.EVT_BUTTON, self.on_refresh)
         tb1.Add(btn_refresh, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 16)
 
-        tb1.Add(wx.StaticText(panel, label="View as:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        # tb1.Add(wx.StaticText(panel, label="View as:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
         self.choice_unit = wx.Choice(panel, choices=["1 byte", "2 bytes", "4 bytes"])
         self.choice_unit.SetSelection(0)
+        self.choice_unit.SetToolTip("Grouping")
         self.choice_unit.Bind(wx.EVT_CHOICE, self.on_unit_change)
-        tb1.Add(self.choice_unit, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 16)
+        tb1.Add(self.choice_unit, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 12)
 
-        tb1.Add(wx.StaticText(panel, label="Go to:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
-        self.combo_goto = wx.ComboBox(panel, size=(130, -1), style=wx.CB_DROPDOWN | wx.TE_PROCESS_ENTER)
-        self.combo_goto.Bind(wx.EVT_TEXT_ENTER, self.on_goto)
-        tb1.Add(self.combo_goto, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
-        btn_goto = wx.Button(panel, label="Go", size=(40, -1))
-        btn_goto.Bind(wx.EVT_BUTTON, self.on_goto)
-        tb1.Add(btn_goto, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 16)
+        # tb1.Add(wx.StaticText(panel, label="Endian:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        self.choice_endian = wx.Choice(panel, choices=["Little-endian", "Big-endian"])
+        self.choice_endian.SetSelection(0)  # default little-endian
+        self.choice_endian.SetToolTip("Endianness for multi-byte view")
+        self.choice_endian.Bind(wx.EVT_CHOICE, self.on_endian_change)
+        self.choice_endian.Enable(False)  # 1-byte mode: endianness not applicable
+        tb1.Add(self.choice_endian, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 16)
 
         # CRC32 labels sticky to the left (no stretch spacer before them)
         self.lbl_data_crc32 = wx.StaticText(panel, label="Data CRC32: N/A", size=(200, -1))
@@ -129,6 +131,7 @@ class MainFrame(wx.Frame):
         self.list_ctrl = HexListCtrl(panel, self)
         mono_font = wx.Font(10, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL, faceName="Courier New")
         self.list_ctrl.SetFont(mono_font)
+
         self.configure_columns()
 
         sizer.Add(tb1, 0, wx.ALL | wx.EXPAND, 8)
@@ -444,7 +447,7 @@ class MainFrame(wx.Frame):
 
     def configure_columns(self):
         self.list_ctrl.ClearAll()
-        self.list_ctrl.InsertColumn(0, "Address", width=110)
+        self.list_ctrl.InsertColumn(0, "Address", width=128)
         cols = 16 // self.unit_size
         col_width = {1: 38, 2: 64, 4: 112}[self.unit_size]
         for c in range(cols):
@@ -454,8 +457,13 @@ class MainFrame(wx.Frame):
 
     def on_unit_change(self, _evt):
         self.unit_size = [1, 2, 4][self.choice_unit.GetSelection()]
+        self.choice_endian.Enable(self.unit_size > 1)
         self.configure_columns()
         self.populate_table()
+
+    def on_endian_change(self, _evt):
+        self.endianness = "little" if self.choice_endian.GetSelection() == 0 else "big"
+        self.list_ctrl.Refresh()
 
     def on_goto(self, _evt):
         raw = self.combo_goto.GetValue().strip()
@@ -541,7 +549,8 @@ class MainFrame(wx.Frame):
         mem       = self.mem
 
         if col == 0:
-            return f"0x{row_base:08X}"
+            addr = f"{row_base:08X}"
+            return f"{addr[:4]}_{addr[4:]}"
 
         if col == ascii_col:
             chars = []
@@ -555,6 +564,10 @@ class MainFrame(wx.Frame):
             vals = [mem.get(group_start + j) for j in range(self.unit_size)]
             if any(v is None for v in vals):
                 return "." * (2 * self.unit_size)
+
+            if self.unit_size > 1 and self.endianness == "little":
+                vals = list(reversed(vals))
+
             return "".join(f"{v:02X}" for v in vals)
 
         return ""

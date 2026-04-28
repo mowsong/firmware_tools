@@ -9,6 +9,11 @@ Usage:
   python bump_version.py diff minor
   python bump_version.py diff major
   python bump_version.py diff 2.5.1
+  
+  python bump_version.py merge           -> bumps merge patch
+  python bump_version.py merge minor
+  python bump_version.py merge major
+  python bump_version.py merge 2.5.1  
 
   python bump_version.py all             -> bumps patch for both
 """

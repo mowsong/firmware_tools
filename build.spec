@@ -2,7 +2,7 @@
 
 block_cipher = None
 
-# ── hex_viewer ────────────────────────────────────────────────────────────────
+# hex_viewer 
 a_viewer = Analysis(
     ['hex_viewer.py'],
     pathex=[],
@@ -25,7 +25,7 @@ exe_viewer = EXE(
     icon='icons/hex_viewer.ico',
 )
 
-# ── hex_diff_tool ─────────────────────────────────────────────────────────────
+# hex_diff_tool
 a_diff = Analysis(
     ['hex_diff_tool.py'],
     pathex=[],
@@ -46,4 +46,28 @@ exe_diff = EXE(
     debug=False, strip=False, upx=True, console=False, upx_exclude=[],
     runtime_tmpdir=None,
     icon='icons/hex_diff_tool.ico',
+)
+
+
+# merge_tool 
+a_merge = Analysis(
+    ['merge_tool.py'],
+    pathex=[],
+    binaries=[],
+    datas=[('icons', 'icons')],
+    hiddenimports=['intelhex', 'wx', 'wx.stc'],
+    hookspath=[],
+    runtime_hooks=[],
+    excludes=[],
+    cipher=block_cipher,
+)
+
+pyz_merge = PYZ(a_merge.pure, a_merge.zipped_data, cipher=block_cipher)
+
+exe_merge = EXE(
+    pyz_merge, a_merge.scripts, a_merge.binaries, a_merge.zipfiles, a_merge.datas, [],
+    name='merge_tool',
+    debug=False, strip=False, upx=True, console=False, upx_exclude=[],
+    runtime_tmpdir=None,
+    icon='icons/merge_tool.ico',
 )

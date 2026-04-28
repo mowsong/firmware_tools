@@ -60,7 +60,7 @@ def load_path(
             ih.loadhex(path)
         except (OSError, HexRecordError, ValueError) as e:
             raise RuntimeError(f"{side} load failed: {e}") from e
-        return ih.todict(), None
+        return {int(k): v for k, v in ih.todict().items() if k != 'start_addr'}, None
 
     if ext == ".bin":
         try:
@@ -322,6 +322,7 @@ class DiffFrame(wx.Frame):
 
         self._syncing_scroll = False
         self._updating_text = False
+        self._resizing_splitter = False
 
         self.diff_nav_positions: list[tuple[int, int]] = []
         self.current_diff_idx: int = -1
@@ -372,7 +373,17 @@ class DiffFrame(wx.Frame):
         toolbar.Add(self.btn_last_diff,  0, wx.RIGHT, 12)
         toolbar.Add(self.btn_refresh,    0)
 
-        root.Add(toolbar, 0, wx.ALL | wx.EXPAND, 8)
+        # -- bit change stats bar ----------------------------------------------
+        stats_bar = wx.BoxSizer(wx.HORIZONTAL)
+        self.lbl_bit_changes = wx.StaticText(
+            panel,
+            label="Bit changes:  0→1: 0 bits    1→0: 0 bits    Total: 0"
+        )
+
+        stats_bar.Add(self.lbl_bit_changes, 0, wx.ALIGN_CENTER_VERTICAL)
+
+        root.Add(toolbar,   0, wx.ALL | wx.EXPAND, 8)
+        root.Add(stats_bar, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 8)
 
         # -- pane labels + splitter --------------------------------------------
         pane_container = wx.Panel(panel)
@@ -384,26 +395,37 @@ class DiffFrame(wx.Frame):
         left_hdr = wx.BoxSizer(wx.HORIZONTAL)
         self.btn_reload_left = wx.Button(pane_container, label="Reload")
         self.btn_close_left  = wx.Button(pane_container, label="✕", size=(28, -1))
-        self.lbl_left = wx.StaticText(pane_container, label="LEFT")
+        self.lbl_left = wx.StaticText(
+            pane_container,
+            label="LEFT",
+            style=wx.ST_ELLIPSIZE_MIDDLE | wx.ST_NO_AUTORESIZE,
+        )
+        self.lbl_left.SetMinSize((1, -1))  # allow shrinking so ellipsis can apply
         left_hdr.Add(self.btn_reload_left, 0, wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 6)
         left_hdr.Add(self.btn_close_left,  0, wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 6)
-        left_hdr.Add(self.lbl_left, 0, wx.ALIGN_CENTER_VERTICAL)
+        left_hdr.Add(self.lbl_left, 1, wx.EXPAND)
 
         right_hdr = wx.BoxSizer(wx.HORIZONTAL)
         self.btn_reload_right = wx.Button(pane_container, label="Reload")
         self.btn_close_right  = wx.Button(pane_container, label="✕", size=(28, -1))
-        self.lbl_right = wx.StaticText(pane_container, label="RIGHT")
+        self.lbl_right = wx.StaticText(
+            pane_container,
+            label="RIGHT",
+            style=wx.ST_ELLIPSIZE_MIDDLE | wx.ST_NO_AUTORESIZE,
+        )
+        self.lbl_right.SetMinSize((1, -1))  # allow shrinking so ellipsis can apply
         right_hdr.Add(self.btn_reload_right, 0, wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 6)
         right_hdr.Add(self.btn_close_right,  0, wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 6)
-        right_hdr.Add(self.lbl_right, 0, wx.ALIGN_CENTER_VERTICAL)
+        right_hdr.Add(self.lbl_right, 1, wx.EXPAND)
 
         self.btn_reload_left.Bind(wx.EVT_BUTTON,  self.on_reload_left)
         self.btn_reload_right.Bind(wx.EVT_BUTTON, self.on_reload_right)
         self.btn_close_left.Bind(wx.EVT_BUTTON,   self.on_close_left)
         self.btn_close_right.Bind(wx.EVT_BUTTON,  self.on_close_right)
 
-        labels.Add(left_hdr, 1, wx.LEFT, 4)
-        labels.Add(right_hdr, 1, wx.LEFT, 8)
+        # make each header consume half row width
+        labels.Add(left_hdr, 1, wx.LEFT | wx.EXPAND, 4)
+        labels.Add(right_hdr, 1, wx.LEFT | wx.EXPAND, 8)
         pane_sizer.Add(labels, 0, wx.BOTTOM | wx.EXPAND, 4)
 
         self.splitter = wx.SplitterWindow(pane_container, style=wx.SP_LIVE_UPDATE | wx.SP_3D)
@@ -426,6 +448,7 @@ class DiffFrame(wx.Frame):
         self.right_pane.SetSizer(right_pane_sizer)
 
         self.splitter.SplitVertically(self.left_pane, self.right_pane, sashPosition=805)
+        self.splitter.Bind(wx.EVT_SIZE, self._on_splitter_size)
 
         self._setup_stc(self.left_view)
         self._setup_stc(self.right_view)
@@ -464,11 +487,32 @@ class DiffFrame(wx.Frame):
         # Global key navigation
         self.Bind(wx.EVT_CHAR_HOOK, self._on_char_hook)
 
+        wx.CallAfter(self._set_equal_splitter)
+
     # -- status bar helper -----------------------------------------------------
     def _set_status(self, *parts: str):
         """Join non-empty parts with  |  and show in the single status field."""
         text = "  |  ".join(p for p in parts if p)
         self.SetStatusText(text)
+
+    def _set_equal_splitter(self):
+        if not hasattr(self, "splitter") or not self.splitter.IsSplit():
+            return
+        total_width = self.splitter.GetClientSize().width
+        if total_width <= 1:
+            return
+        sash_size = self.splitter.GetSashSize()
+        pos = max(1, (total_width - sash_size) // 2)
+        self._resizing_splitter = True
+        try:
+            self.splitter.SetSashPosition(pos)
+        finally:
+            self._resizing_splitter = False
+
+    def _on_splitter_size(self, evt: wx.SizeEvent):
+        if not self._resizing_splitter:
+            wx.CallAfter(self._set_equal_splitter)
+        evt.Skip()
     
     # Global key handler
     def _on_char_hook(self, evt: wx.KeyEvent):
@@ -847,7 +891,7 @@ class DiffFrame(wx.Frame):
         self.left_path = ""
         self.left_mem = {}
         self.left_bin_offset = None
-        self.lbl_left.SetLabel("LEFT")
+        self._set_side_label("LEFT", "")
         self.refresh_views()
 
     def on_close_right(self, _evt):
@@ -856,7 +900,7 @@ class DiffFrame(wx.Frame):
         self.right_path = ""
         self.right_mem = {}
         self.right_bin_offset = None
-        self.lbl_right.SetLabel("RIGHT")
+        self._set_side_label("RIGHT", "")
         self.refresh_views()
 
     # -- navigation ------------------------------------------------------------
@@ -927,6 +971,7 @@ class DiffFrame(wx.Frame):
                 self._apply_styled_text(self.left_view,  "", [])
                 self._apply_styled_text(self.right_view, "", [])
                 self._update_marker_strips()
+                self._update_bit_stats(bounds)
                 self._set_status("Open LEFT and RIGHT files")
                 return
 
@@ -936,6 +981,7 @@ class DiffFrame(wx.Frame):
                 self.left_view.ScrollToLine(0);  self.left_view.SetXOffset(0)
                 self.right_view.ScrollToLine(0); self.right_view.SetXOffset(0)
                 self._update_marker_strips()
+                self._update_bit_stats(bounds)
                 self._set_status(range_label, "Load RIGHT file to compare")
                 return
 
@@ -945,6 +991,7 @@ class DiffFrame(wx.Frame):
                 self.left_view.ScrollToLine(0);  self.left_view.SetXOffset(0)
                 self.right_view.ScrollToLine(0); self.right_view.SetXOffset(0)
                 self._update_marker_strips()
+                self._update_bit_stats(bounds)
                 self._set_status(range_label, "Load LEFT file to compare")
                 return
 
@@ -953,6 +1000,7 @@ class DiffFrame(wx.Frame):
                 self._apply_styled_text(self.left_view,  "", [])
                 self._apply_styled_text(self.right_view, "", [])
                 self._update_marker_strips()
+                self._update_bit_stats(bounds)
                 self._set_status(range_label, "No data in range")
                 return
 
@@ -965,6 +1013,7 @@ class DiffFrame(wx.Frame):
             self.left_view.ScrollToLine(0);  self.left_view.SetXOffset(0)
             self.right_view.ScrollToLine(0); self.right_view.SetXOffset(0)
             self._update_marker_strips()
+            self._update_bit_stats(bounds)
 
             nav = "F7/Shift+F7 or Arrow/PgUp/PgDn: next/prev diff" if diffs else "No differences"
             self._set_status(range_label, f"Rows: {len(bases)}", f"Compared: {compared}", f"Diffs: {diffs}", nav)
@@ -979,6 +1028,36 @@ class DiffFrame(wx.Frame):
         self.btn_prev_diff.Enable(has_diffs)
         self.btn_next_diff.Enable(has_diffs)
         self.btn_last_diff.Enable(has_diffs)
+        
+    def _calc_bit_changes(self, bounds: tuple[int | None, int | None]) -> tuple[int, int]:
+        bits_0to1 = bits_1to0 = 0
+        all_addrs = set(self.left_mem.keys()) | set(self.right_mem.keys())
+        for addr in all_addrs:
+            if not self._addr_in_range(addr, bounds):
+                continue
+            lv = self.left_mem.get(addr)
+            rv = self.right_mem.get(addr)
+            if lv is None or rv is None or lv == rv:
+                continue
+            diff = lv ^ rv
+            for bit in range(8):
+                if diff & (1 << bit):
+                    if (lv >> bit) & 1:
+                        bits_1to0 += 1
+                    else:
+                        bits_0to1 += 1
+        return bits_0to1, bits_1to0
+
+    def _update_bit_stats(self, bounds: tuple[int | None, int | None]):
+        if not (self.left_path and self.right_path):
+            self.lbl_bit_changes.SetLabel("Bit changes:  0→1: 0 bits    1→0: 0 bits    Total: 0")
+            return
+
+        bits_0to1, bits_1to0 = self._calc_bit_changes(bounds)
+        total = bits_0to1 + bits_1to0
+        self.lbl_bit_changes.SetLabel(
+            f"Bit changes:  0→1: {bits_0to1} bits    1→0: {bits_1to0} bits    Total: {total}"
+        )
         
     def _sync_to_other(self, src: stc.StyledTextCtrl, dst: stc.StyledTextCtrl):
         if self._syncing_scroll or self._updating_text:
@@ -997,7 +1076,23 @@ class DiffFrame(wx.Frame):
                 dst.SetXOffset(src_x)
         finally:
             self._syncing_scroll = False
-
+            
+    def _set_side_label(self, side: str, path: str):
+        if side == "LEFT":
+            if path:
+                self.lbl_left.SetLabel(f"LEFT: {path}")
+                self.lbl_left.SetToolTip(path)
+            else:
+                self.lbl_left.SetLabel("LEFT")
+                self.lbl_left.SetToolTip(None)
+        elif side == "RIGHT":
+            if path:
+                self.lbl_right.SetLabel(f"RIGHT: {path}")
+                self.lbl_right.SetToolTip(path)
+            else:
+                self.lbl_right.SetLabel("RIGHT")
+                self.lbl_right.SetToolTip(None)
+                
     def _load_into_side(self, path: str, side: str):
         ext = os.path.splitext(path)[1].lower()
         # Only reuse remembered offset when reloading the same file
@@ -1014,12 +1109,12 @@ class DiffFrame(wx.Frame):
             self.left_path = path
             self.left_mem = mem
             self.left_bin_offset = used_offset if ext == ".bin" else None
-            self.lbl_left.SetLabel(f"LEFT: {path}")
+            self._set_side_label("LEFT", path)
         elif side == "RIGHT":
             self.right_path = path
             self.right_mem = mem
             self.right_bin_offset = used_offset if ext == ".bin" else None
-            self.lbl_right.SetLabel(f"RIGHT: {path}")
+            self._set_side_label("RIGHT", path)
         else:
             raise RuntimeError(f"Invalid side: {side}")
 
