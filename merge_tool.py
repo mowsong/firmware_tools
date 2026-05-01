@@ -43,20 +43,41 @@ class MergeFrame(wx.Frame):
         panel = wx.Panel(self)
         root = wx.BoxSizer(wx.VERTICAL)
 
-        info = wx.StaticText(
+        info1 = wx.StaticText(
             panel,
             label=(
                 "Add one row per merge input. HEX rows use file addresses. "
                 "BIN rows require a target offset and can optionally specify a block. "
-                "Files can also be dragged onto the table or window."
             ),
         )
-        root.Add(info, 0, wx.ALL | wx.EXPAND, 8)
+        root.Add(info1, 0, wx.ALL | wx.EXPAND, 8)
 
+        # make the static text font bigger
+        font = info1.GetFont()
+        font.SetPointSize(font.GetPointSize() + 2)
+        info1.SetFont(font)
+        
+        info2 = wx.StaticText(
+            panel,
+            label=(
+                "Files can also be dragged onto the table or window."
+            ),
+            
+        )
+        root.Add(info2, 0, wx.ALL | wx.EXPAND, 8)
+        # make the static text font bigger
+        font = info2.GetFont()
+        font.SetPointSize(font.GetPointSize() + 2)
+        info2.SetFont(font)
+        
         self.grid = gridlib.Grid(panel)
         self.grid.CreateGrid(0, 6)
         self.grid.SetDefaultCellAlignment(wx.ALIGN_LEFT, wx.ALIGN_TOP)
         self.grid.SetDefaultRowSize(24, resizeExistingRows=True)
+
+        # Make row-number area narrow (just enough for row indices)
+        self._fit_row_label_width()
+
         self.grid.SetColLabelValue(COL_ENABLED, "Use")
         self.grid.SetColLabelValue(COL_TYPE, "Type")
         self.grid.SetColLabelValue(COL_FILE, "File")
@@ -65,6 +86,14 @@ class MergeFrame(wx.Frame):
         self.grid.SetColLabelValue(COL_BLOCK_LENGTH, "Block Length")
 
         self.grid.SetColFormatBool(COL_ENABLED)
+
+        # Center-align checkbox cells in the "Use" column
+        enabled_attr = gridlib.GridCellAttr()
+        enabled_attr.SetEditor(gridlib.GridCellBoolEditor())
+        enabled_attr.SetRenderer(gridlib.GridCellBoolRenderer())
+        enabled_attr.SetAlignment(wx.ALIGN_CENTER, wx.ALIGN_CENTER)
+        self.grid.SetColAttr(COL_ENABLED, enabled_attr)
+
         self.grid.SetColSize(COL_ENABLED, 60)
         self.grid.SetColSize(COL_TYPE, 80)
         self.grid.SetColSize(COL_FILE, 460)
@@ -149,6 +178,14 @@ class MergeFrame(wx.Frame):
 
         wx.CallAfter(self._refresh_all_row_heights)
 
+    def _fit_row_label_width(self):
+        rows = max(1, self.grid.GetNumberRows())
+        digits = len(str(rows))
+        dc = wx.ClientDC(self.grid.GetGridWindow())
+        dc.SetFont(self.grid.GetLabelFont())
+        text_w, _ = dc.GetTextExtent("9" * digits)
+        self.grid.SetRowLabelSize(max(24, text_w + 10))
+        
     def _set_row_values(self, row, file_path="", file_type="auto", offset="", block_start="", block_length="", enabled=True):
         self.grid.SetCellEditor(row, COL_TYPE, gridlib.GridCellChoiceEditor(["auto", "hex", "bin"]))
         self.grid.SetCellRenderer(row, COL_FILE, gridlib.GridCellAutoWrapStringRenderer())
@@ -271,12 +308,14 @@ class MergeFrame(wx.Frame):
         row = self.grid.GetNumberRows()
         self.grid.AppendRows(1)
         self._set_row_values(row, file_path, file_type, offset, block_start, block_length, enabled)
+        self._fit_row_label_width()
         return row
 
     def insert_row(self, row, file_path="", file_type="auto", offset="", block_start="", block_length="", enabled=True):
         row = max(0, min(row, self.grid.GetNumberRows()))
         self.grid.InsertRows(row, 1)
         self._set_row_values(row, file_path, file_type, offset, block_start, block_length, enabled)
+        self._fit_row_label_width()
         return row
 
     def log_line(self, text):
@@ -417,6 +456,7 @@ class MergeFrame(wx.Frame):
         if self.grid.GetNumberRows() == 0:
             self.add_row()
 
+        self._fit_row_label_width()
         wx.CallAfter(self._refresh_all_row_heights)
 
     def on_browse_input(self, _event):

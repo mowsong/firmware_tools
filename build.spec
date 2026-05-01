@@ -2,6 +2,15 @@
 
 block_cipher = None
 
+UPX_EXCLUDE = [
+    'api-ms-win-crt-*.dll',
+    'api-ms-win-core-*.dll',
+    'ucrtbase.dll',
+    'vcruntime*.dll',
+    'msvcp*.dll',
+    'python3*.dll',
+]
+
 # hex_viewer 
 a_viewer = Analysis(
     ['hex_viewer.py'],
@@ -20,7 +29,8 @@ pyz_viewer = PYZ(a_viewer.pure, a_viewer.zipped_data, cipher=block_cipher)
 exe_viewer = EXE(
     pyz_viewer, a_viewer.scripts, a_viewer.binaries, a_viewer.zipfiles, a_viewer.datas, [],
     name='hex_viewer',
-    debug=False, strip=False, upx=True, console=False, upx_exclude=[],
+    debug=False, strip=False, upx=True, console=False, 
+    upx_exclude=UPX_EXCLUDE,
     runtime_tmpdir=None,
     icon='icons/hex_viewer.ico',
 )
@@ -43,7 +53,8 @@ pyz_diff = PYZ(a_diff.pure, a_diff.zipped_data, cipher=block_cipher)
 exe_diff = EXE(
     pyz_diff, a_diff.scripts, a_diff.binaries, a_diff.zipfiles, a_diff.datas, [],
     name='hex_diff_tool',
-    debug=False, strip=False, upx=True, console=False, upx_exclude=[],
+    debug=False, strip=False, upx=True, console=False, 
+    upx_exclude=UPX_EXCLUDE,
     runtime_tmpdir=None,
     icon='icons/hex_diff_tool.ico',
 )
@@ -67,7 +78,8 @@ pyz_merge = PYZ(a_merge.pure, a_merge.zipped_data, cipher=block_cipher)
 exe_merge = EXE(
     pyz_merge, a_merge.scripts, a_merge.binaries, a_merge.zipfiles, a_merge.datas, [],
     name='merge_tool',
-    debug=False, strip=False, upx=True, console=False, upx_exclude=[],
+    debug=False, strip=False, upx=True, console=False, 
+    upx_exclude=UPX_EXCLUDE,
     runtime_tmpdir=None,
     icon='icons/merge_tool.ico',
 )
