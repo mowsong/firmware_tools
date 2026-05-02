@@ -6,7 +6,7 @@ import wx.grid as gridlib
 from wx.lib.wordwrap import wordwrap
 from intelhex import IntelHex
 import ctypes
-from version import __version__
+from version import __version_merge__ as __version__
 
 
 COL_ENABLED = 0

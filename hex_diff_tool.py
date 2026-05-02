@@ -87,7 +87,7 @@ class DiffMarkerStrip(wx.Panel):
         self.SetMinSize((10, -1))
         self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
         self.Bind(wx.EVT_PAINT, self.on_paint)
-
+        
     def update_markers(self, diff_lines: list[int], total_lines: int, current_line: int | None = None):
         self.diff_lines = diff_lines
         self.total_lines = max(1, total_lines)
@@ -487,6 +487,9 @@ class DiffFrame(wx.Frame):
         # Global key navigation
         self.Bind(wx.EVT_CHAR_HOOK, self._on_char_hook)
 
+        # center the window
+        self.Center()
+        
         wx.CallAfter(self._set_equal_splitter)
 
     # -- status bar helper -----------------------------------------------------

@@ -157,6 +157,10 @@ class MainFrame(wx.Frame):
             ])
         )
 
+        # center window
+        self.Center()
+        
+        
     # -- CRC helpers --
 
     def _crc16_bytes(self, data: bytes) -> int:

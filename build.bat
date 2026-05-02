@@ -1,1 +1,0 @@
-pyinstaller .\build.spec --clean --upx-dir "E:\xboot\upx\upx-5.1.1-win64"
