@@ -94,12 +94,22 @@ class MainFrame(wx.Frame):
         self.choice_endian.Enable(False)  # 1-byte mode: endianness not applicable
         tb1.Add(self.choice_endian, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 16)
 
-        # CRC32 labels sticky to the left (no stretch spacer before them)
-        self.lbl_data_crc32 = wx.StaticText(panel, label="Data CRC32: N/A", size=(200, -1))
-        tb1.Add(self.lbl_data_crc32, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 16)
+        tb1.Add(wx.StaticText(panel, label="Go to:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
 
-        self.lbl_file_crc32 = wx.StaticText(panel, label="File CRC32: N/A", size=(200, -1))
-        tb1.Add(self.lbl_file_crc32, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.combo_goto = wx.ComboBox(
+            panel,
+            value="0x00000000",
+            choices=self.goto_history,
+            style=wx.CB_DROPDOWN | wx.TE_PROCESS_ENTER,
+            size=(130, -1),
+        )
+        self.combo_goto.SetToolTip("Address in decimal or 0x-prefixed hex")
+        self.combo_goto.Bind(wx.EVT_TEXT_ENTER, self.on_goto)
+        tb1.Add(self.combo_goto, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+
+        btn_goto = wx.Button(panel, label="Go")
+        btn_goto.Bind(wx.EVT_BUTTON, self.on_goto)
+        tb1.Add(btn_goto, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 16)
 
         # -- Row 2: block CRC (start, stop, block size, pad, button, result) --
         tb2 = wx.BoxSizer(wx.HORIZONTAL)
@@ -127,6 +137,15 @@ class MainFrame(wx.Frame):
         self.lbl_block_crc = wx.StaticText(panel, label="N/A")
         tb2.Add(self.lbl_block_crc, 0, wx.ALIGN_CENTER_VERTICAL)
 
+        # -- Row 3: CRC32 values --
+        tb3 = wx.BoxSizer(wx.HORIZONTAL)
+
+        self.lbl_data_crc32 = wx.StaticText(panel, label="Data CRC32: N/A", size=(220, -1))
+        tb3.Add(self.lbl_data_crc32, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 16)
+
+        self.lbl_file_crc32 = wx.StaticText(panel, label="File CRC32: N/A", size=(220, -1))
+        tb3.Add(self.lbl_file_crc32, 0, wx.ALIGN_CENTER_VERTICAL)
+
         # -- List --
         self.list_ctrl = HexListCtrl(panel, self)
         mono_font = wx.Font(10, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL, faceName="Courier New")
@@ -136,6 +155,7 @@ class MainFrame(wx.Frame):
 
         sizer.Add(tb1, 0, wx.ALL | wx.EXPAND, 8)
         sizer.Add(tb2, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 8)
+        sizer.Add(tb3, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM | wx.EXPAND, 8)
         sizer.Add(self.list_ctrl, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         panel.SetSizer(sizer)
 
@@ -159,8 +179,7 @@ class MainFrame(wx.Frame):
 
         # center window
         self.Center()
-        
-        
+
     # -- CRC helpers --
 
     def _crc16_bytes(self, data: bytes) -> int:
@@ -248,7 +267,7 @@ class MainFrame(wx.Frame):
             if block_size <= 0:
                 raise ValueError("Block size must be > 0.")
             start = self._parse_non_negative_int(self.txt_crc_start.GetValue(), "start address")
-            stop  = self._parse_non_negative_int(self.txt_crc_end.GetValue(),   "stop address")
+            stop = self._parse_non_negative_int(self.txt_crc_end.GetValue(), "stop address")
             if stop <= start:
                 raise ValueError("Stop address must be > start address.")
             if start % block_size != 0:
@@ -412,8 +431,12 @@ class MainFrame(wx.Frame):
 
     def _ask_offset(self) -> int | None:
         while True:
-            with wx.TextEntryDialog(self, "Enter load offset (decimal or hex, e.g. 0x8000):",
-                                    "Binary Load Offset", value="0x0") as dlg:
+            with wx.TextEntryDialog(
+                self,
+                "Enter load offset (decimal or hex, e.g. 0x8000):",
+                "Binary Load Offset",
+                value="0x0",
+            ) as dlg:
                 if dlg.ShowModal() != wx.ID_OK:
                     return None
                 raw = dlg.GetValue().strip()
@@ -423,8 +446,11 @@ class MainFrame(wx.Frame):
                     raise ValueError("negative offset")
                 return offset
             except ValueError:
-                wx.MessageBox("Invalid offset.\nUse decimal (32768) or hex (0x8000).",
-                              "Invalid Input", wx.OK | wx.ICON_WARNING)
+                wx.MessageBox(
+                    "Invalid offset.\nUse decimal (32768) or hex (0x8000).",
+                    "Invalid Input",
+                    wx.OK | wx.ICON_WARNING,
+                )
 
     # -- Profiling --
 
@@ -478,8 +504,11 @@ class MainFrame(wx.Frame):
             if target < 0:
                 raise ValueError()
         except ValueError:
-            wx.MessageBox("Invalid address.\nUse decimal (32768) or hex (0x8000).",
-                          "Invalid Address", wx.OK | wx.ICON_WARNING)
+            wx.MessageBox(
+                "Invalid address.\nUse decimal (32768) or hex (0x8000).",
+                "Invalid Address",
+                wx.OK | wx.ICON_WARNING,
+            )
             return
         if not self.row_bases:
             wx.MessageBox("No file loaded.", "Go To Address", wx.OK | wx.ICON_INFORMATION)
@@ -487,8 +516,11 @@ class MainFrame(wx.Frame):
         row_base = target & ~0x0F
         match = bisect_left(self.row_bases, row_base)
         if match >= len(self.row_bases):
-            wx.MessageBox(f"Address 0x{target:08X} is beyond the end of the file.",
-                          "Go To Address", wx.OK | wx.ICON_INFORMATION)
+            wx.MessageBox(
+                f"Address 0x{target:08X} is beyond the end of the file.",
+                "Go To Address",
+                wx.OK | wx.ICON_INFORMATION,
+            )
             return
         self.list_ctrl.EnsureVisible(match)
         self.list_ctrl.Select(match)
@@ -547,10 +579,10 @@ class MainFrame(wx.Frame):
     def get_cell_text(self, item: int, col: int) -> str:
         if item < 0 or item >= len(self.row_bases):
             return ""
-        row_base  = self.row_bases[item]
-        cols      = 16 // self.unit_size
+        row_base = self.row_bases[item]
+        cols = 16 // self.unit_size
         ascii_col = cols + 1
-        mem       = self.mem
+        mem = self.mem
 
         if col == 0:
             addr = f"{row_base:08X}"

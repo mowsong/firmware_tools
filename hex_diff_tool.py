@@ -324,7 +324,7 @@ class DiffFrame(wx.Frame):
         self._updating_text = False
         self._resizing_splitter = False
 
-        self.diff_nav_positions: list[tuple[int, int]] = []
+        self.diff_nav_positions: list[tuple[int, int, int]] = []
         self.current_diff_idx: int = -1
 
         panel = wx.Panel(self)
@@ -335,6 +335,11 @@ class DiffFrame(wx.Frame):
         self.btn_open_left  = wx.Button(panel, label="Open Left...")
         self.btn_open_right = wx.Button(panel, label="Open Right...")
         self.chk_only_diff  = wx.CheckBox(panel, label="Only differences")
+        self.choice_view_mode = wx.Choice(panel, choices=["Byte", "Half-word", "Word"])
+        self.choice_view_mode.SetSelection(0)
+        self.choice_endian = wx.Choice(panel, choices=["Little-endian", "Big-endian"])
+        self.choice_endian.SetSelection(0)  # keep previous behavior by default
+
         self.txt_range_start = wx.TextCtrl(panel, value="", style=wx.TE_PROCESS_ENTER, size=(95, -1))
         self.txt_range_end   = wx.TextCtrl(panel, value="", style=wx.TE_PROCESS_ENTER, size=(95, -1))
         self.btn_first_diff = wx.BitmapButton(panel, bitmap=_load_icon("icon_first.png"), size=(36, -1))
@@ -346,6 +351,8 @@ class DiffFrame(wx.Frame):
         self.btn_open_left.Bind(wx.EVT_BUTTON,    self.on_open_left)
         self.btn_open_right.Bind(wx.EVT_BUTTON,   self.on_open_right)
         self.chk_only_diff.Bind(wx.EVT_CHECKBOX,  self.on_refresh)
+        self.choice_view_mode.Bind(wx.EVT_CHOICE, self.on_refresh)
+        self.choice_endian.Bind(wx.EVT_CHOICE, self.on_refresh)
         self.txt_range_start.Bind(wx.EVT_TEXT_ENTER, self.on_refresh)
         self.txt_range_end.Bind(wx.EVT_TEXT_ENTER,   self.on_refresh)
         self.btn_first_diff.Bind(wx.EVT_BUTTON,   self.on_first_diff)
@@ -361,6 +368,13 @@ class DiffFrame(wx.Frame):
         toolbar.Add(self.btn_open_left,  0, wx.RIGHT, 8)
         toolbar.Add(self.btn_open_right, 0, wx.RIGHT, 8)
         toolbar.Add(self.chk_only_diff,  0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 12)
+
+        toolbar.Add(wx.StaticText(panel, label="View:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        toolbar.Add(self.choice_view_mode, 0, wx.RIGHT, 12)
+
+        toolbar.Add(wx.StaticText(panel, label="Endian:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        toolbar.Add(self.choice_endian, 0, wx.RIGHT, 12)
+
         toolbar.Add(wx.StaticText(panel, label="Range [start, stop):"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
         toolbar.Add(wx.StaticText(panel, label="0x"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 2)
         toolbar.Add(self.txt_range_start, 0, wx.RIGHT, 6)
@@ -687,23 +701,45 @@ class DiffFrame(wx.Frame):
             return ""
         bases = sorted({a & ~0x0F for a in mem.keys()})
         bases = [b for b in bases if self._row_overlaps_range(b, bounds)]
+        unit = self._get_unit_bytes()
 
         chunks: list[str] = []
         for base in bases:
             hex_parts: list[str] = []
             ascii_parts: list[str] = []
+
+            for group_start in range(0, 16, unit):
+                tok_parts: list[str] = []
+                for j in range(unit):
+                    a = base + group_start + j
+                    in_range = self._addr_in_range(a, bounds)
+                    v = mem.get(a)
+                    tok_parts.append(self._fmt(v) if in_range else "..")
+                hex_parts.append("".join(tok_parts[k] for k in self._unit_display_order(unit)))
+
             for i in range(16):
                 a = base + i
                 in_range = self._addr_in_range(a, bounds)
                 v = mem.get(a)
-                hex_parts.append(self._fmt(v) if in_range else "..")
                 ascii_parts.append(self._byte_to_ascii(v, in_range))
 
             chunks.append(f"{base:08X}: {' '.join(hex_parts)}  |{''.join(ascii_parts)}|\n")
         return "".join(chunks)
 
-    @staticmethod
-    def _byte_to_ascii(v: int | None, in_range: bool) -> str:
+    def _get_unit_bytes(self) -> int:
+        mode = self.choice_view_mode.GetStringSelection() if hasattr(self, "choice_view_mode") else "Byte"
+        return {"Byte": 1, "Half-word": 2, "Word": 4}.get(mode, 1)
+
+    def _is_little_endian(self) -> bool:
+        mode = self.choice_endian.GetStringSelection() if hasattr(self, "choice_endian") else "Big-endian"
+        return mode == "Little-endian"
+
+    def _unit_display_order(self, unit: int) -> list[int]:
+        if unit <= 1:
+            return [0]
+        return list(reversed(range(unit))) if self._is_little_endian() else list(range(unit))
+
+    def _byte_to_ascii(self, v: int | None, in_range: bool) -> str:
         if not in_range:
             return " "
         if v is None:
@@ -712,14 +748,16 @@ class DiffFrame(wx.Frame):
 
     def _build_texts_and_spans(
         self, bases: list[int], bounds: tuple[int | None, int | None]
-    ) -> tuple[str, list[tuple[int, int]], str, list[tuple[int, int]], int, int, list[tuple[int, int]]]:
-        left_chunks:   list[str]             = []
-        right_chunks:  list[str]             = []
+    ) -> tuple[str, list[tuple[int, int]], str, list[tuple[int, int]], int, int, list[tuple[int, int, int]]]:
+        left_chunks:   list[str] = []
+        right_chunks:  list[str] = []
         left_spans:    list[tuple[int, int]] = []
         right_spans:   list[tuple[int, int]] = []
-        nav_positions: list[tuple[int, int]] = []
+        nav_positions: list[tuple[int, int, int]] = []
 
         left_pos = right_pos = compared = diffs = 0
+        unit = self._get_unit_bytes()
+        order = self._unit_display_order(unit)
 
         for base in bases:
             prefix = f"{base:08X}: "
@@ -728,40 +766,52 @@ class DiffFrame(wx.Frame):
             left_pos += len(prefix)
             right_pos += len(prefix)
 
-            # Hex area
-            for i in range(16):
-                a = base + i
-                lv = self.left_mem.get(a)
-                rv = self.right_mem.get(a)
-
-                if i > 0:
+            # Hex area grouped by selected unit
+            for group_start in range(0, 16, unit):
+                if group_start > 0:
                     left_chunks.append(" ");  left_pos += 1
                     right_chunks.append(" "); right_pos += 1
 
-                in_range = self._addr_in_range(a, bounds)
-                ltok = self._fmt(lv) if in_range else ".."
-                rtok = self._fmt(rv) if in_range else ".."
+                ltok_parts: list[str] = []
+                rtok_parts: list[str] = []
+                unit_diff = False
+
+                for j in range(unit):
+                    a = base + group_start + j
+                    lv = self.left_mem.get(a)
+                    rv = self.right_mem.get(a)
+                    in_range = self._addr_in_range(a, bounds)
+
+                    ltok_parts.append(self._fmt(lv) if in_range else "..")
+                    rtok_parts.append(self._fmt(rv) if in_range else "..")
+
+                    if in_range:
+                        if lv is not None or rv is not None:
+                            compared += 1
+                        if lv != rv and not (lv is None and rv is None):
+                            diffs += 1
+                            unit_diff = True
+
+                ltok = "".join(ltok_parts[k] for k in order)
+                rtok = "".join(rtok_parts[k] for k in order)
+                tok_len = 2 * unit
 
                 left_chunks.append(ltok)
                 right_chunks.append(rtok)
 
-                if in_range:
-                    if lv is not None or rv is not None:
-                        compared += 1
-                    if lv != rv and not (lv is None and rv is None):
-                        diffs += 1
-                        left_spans.append((left_pos, 2))
-                        right_spans.append((right_pos, 2))
-                        nav_positions.append((left_pos, right_pos))
+                if unit_diff:
+                    left_spans.append((left_pos, tok_len))
+                    right_spans.append((right_pos, tok_len))
+                    nav_positions.append((left_pos, right_pos, tok_len))
 
-                left_pos += 2
-                right_pos += 2
+                left_pos += tok_len
+                right_pos += tok_len
 
             # ASCII area prefix
             left_chunks.append("  |");  left_pos += 3
             right_chunks.append("  |"); right_pos += 3
 
-            # ASCII area (also highlight diffs)
+            # ASCII area (keep per-byte char highlighting)
             for i in range(16):
                 a = base + i
                 lv = self.left_mem.get(a)
@@ -810,7 +860,7 @@ class DiffFrame(wx.Frame):
         diff_lines: list[int] = []
         if self.diff_nav_positions:
             seen: set[int] = set()
-            for lpos, _ in self.diff_nav_positions:
+            for lpos, _, _ in self.diff_nav_positions:
                 line = self.left_view.LineFromPosition(lpos)
                 if line not in seen:
                     seen.add(line)
@@ -818,7 +868,7 @@ class DiffFrame(wx.Frame):
 
         current_line = None
         if 0 <= self.current_diff_idx < len(self.diff_nav_positions):
-            lpos, _ = self.diff_nav_positions[self.current_diff_idx]
+            lpos, _, _ = self.diff_nav_positions[self.current_diff_idx]
             current_line = self.left_view.LineFromPosition(lpos)
 
         self.right_marker_strip.update_markers(diff_lines, total_lines, current_line)
@@ -912,11 +962,11 @@ class DiffFrame(wx.Frame):
             return
         idx %= len(self.diff_nav_positions)
         self.current_diff_idx = idx
-        lpos, rpos = self.diff_nav_positions[idx]
+        lpos, rpos, length = self.diff_nav_positions[idx]
 
         self._syncing_scroll = True
         try:
-            self._mark_current_diff_highlight(lpos, rpos, 2)
+            self._mark_current_diff_highlight(lpos, rpos, length)
             self.left_view.GotoPos(lpos)
             self.right_view.GotoPos(rpos)
             self.left_view.EnsureCaretVisible()
