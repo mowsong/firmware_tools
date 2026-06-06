@@ -12,7 +12,7 @@ UPX_EXCLUDE = [
     'python3*.dll',
 ]
 
-ALL_APPS = {"hex_viewer", "hex_diff_tool", "merge_tool"}
+ALL_APPS = {"hex_viewer", "hex_diff_tool", "merge_tool", "basic_serial"}
 
 # Read selected apps from environment variable set by wrapper script.
 # Examples:
@@ -101,4 +101,29 @@ if "merge_tool" in SELECTED_APPS:
         upx_exclude=UPX_EXCLUDE,
         runtime_tmpdir=None,
         icon='icons/merge_tool.ico',
+    )
+
+# basic_serial
+if "basic_serial" in SELECTED_APPS:
+    a_serial = Analysis(
+        ['basic_serial.py'],
+        pathex=[],
+        binaries=[],
+        datas=[('icons', 'icons')],
+        hiddenimports=['wx', 'wx.stc'],
+        hookspath=[],
+        runtime_hooks=[],
+        excludes=[],
+        cipher=block_cipher,
+    )
+
+    pyz_serial = PYZ(a_serial.pure, a_serial.zipped_data, cipher=block_cipher)
+
+    exe_serial = EXE(
+        pyz_serial, a_serial.scripts, a_serial.binaries, a_serial.zipfiles, a_serial.datas, [],
+        name='basic_serial',
+        debug=False, strip=False, upx=True, console=False,
+        upx_exclude=UPX_EXCLUDE,
+        runtime_tmpdir=None,
+        icon='icons/basic_serial.ico',
     )

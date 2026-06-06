@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-ALL_APPS = ["hex_viewer", "hex_diff_tool", "merge_tool"]
+ALL_APPS = ["hex_viewer", "hex_diff_tool", "merge_tool", "basic_serial"]
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build selected apps via PyInstaller + build.spec")
@@ -12,7 +12,7 @@ def main() -> int:
         "-a",
         "--apps",
         default="all",
-        help="Comma-separated app list (hex_viewer,hex_diff_tool,merge_tool) or 'all'",
+        help="Comma-separated app list (hex_viewer,hex_diff_tool,merge_tool,basic_serial) or 'all'",
     )
     parser.add_argument(
         "-c",
