@@ -112,6 +112,8 @@ class SerialPortFrame(wx.Frame):
         icon = wx.Icon(os.path.join(ICON_DIR, "basic_serial.ico"), wx.BITMAP_TYPE_ICO)
         self.SetIcon(icon)
 
+        self.next_chunk_starts_with_newline = False
+        
         # ===== Two-column main layout =====
         content_row = wx.BoxSizer(wx.HORIZONTAL)
 
@@ -248,9 +250,15 @@ class SerialPortFrame(wx.Frame):
                 self.port_choice.SetStringSelection(current_port)
 
     def _append_received(self, text: str) -> None:
+        # handle the '\r\n' and '\r' line endings by replacing them with '\n' for consistent display
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+        if self.next_chunk_starts_with_newline and text.startswith("\n"):
+            text = text[1:]
+        
+        self.next_chunk_starts_with_newline = text.endswith("\n")
+        
         self.received_display.AppendText(text)
-        # if not text.endswith("\n"):
-            # self.received_display.AppendText("\n")
 
     def _show_error(self, text: str) -> None:
         self.received_display.AppendText(f"ERROR: {text}\n")
