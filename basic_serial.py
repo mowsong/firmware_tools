@@ -11,6 +11,12 @@ import serial
 from serial.tools import list_ports
 from wx import stc
 
+# Plotting imports
+import matplotlib
+matplotlib.use('WXAgg')
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_wxagg import FigureCanvasWxAgg as FigureCanvas
+
 ICON_DIR = os.path.join(os.path.dirname(__file__), "icons")
 
 class SerialWorker(threading.Thread):
@@ -23,6 +29,7 @@ class SerialWorker(threading.Thread):
 
         self._write_queue: "queue.Queue[bytes]" = queue.Queue()
         self._ser: Optional[serial.Serial] = None
+        self.on_plot_data = None
 
         self._cfg = {
             "port": "",
@@ -87,8 +94,13 @@ class SerialWorker(threading.Thread):
 
                 waiting = self._ser.in_waiting
                 if waiting:
-                    data = self._ser.read(waiting).decode(errors="replace")
-                    self.on_data(data)
+                    raw_data = self._ser.read(waiting)
+                    # Send raw bytes to plot parser
+                    if self.on_plot_data:
+                        self.on_plot_data(raw_data)
+                    # Decode for terminal display
+                    decoded_data = raw_data.decode(errors="replace")
+                    self.on_data(decoded_data)
                 else:
                     time.sleep(0.02)
         except Exception as e:
@@ -103,20 +115,56 @@ class SerialWorker(threading.Thread):
 
 class SerialPortFrame(wx.Frame):
     def __init__(self):
-        super().__init__(parent=None, title=f"Basic Serial v{__version__}", size=(760, 560))
-        self.SetMinSize((500, 400))
+        super().__init__(parent=None, title=f"Basic Serial v{__version__}", size=(860, 600))
+        self.SetMinSize((600, 450))
 
-        panel = wx.Panel(self)
-        root = wx.BoxSizer(wx.VERTICAL)
-
-        # add icon
-        icon = wx.Icon(os.path.join(ICON_DIR, "basic_serial.ico"), wx.BITMAP_TYPE_ICO)
-        self.SetIcon(icon)
-
+        # Initialize attributes first
         self.next_chunk_starts_with_newline = False
         self._max_display_lines = 100000
         self._autoscroll = True
         self._display_lock = threading.Lock()
+        self.worker: Optional[SerialWorker] = None
+
+        root_panel = wx.Panel(self)
+        root_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        # Create a notebook for tabs
+        self.notebook = wx.Notebook(root_panel)
+
+        # Create Terminal Tab
+        terminal_panel = self.create_terminal_tab(self.notebook)
+        self.notebook.AddPage(terminal_panel, "Terminal")
+
+        # Create Plot Tab
+        plot_panel = self.create_plot_tab(self.notebook)
+        self.notebook.AddPage(plot_panel, "Plot")
+
+        root_sizer.Add(self.notebook, 1, wx.EXPAND | wx.ALL, 5)
+        root_panel.SetSizer(root_sizer)
+
+        # add icon
+        icon = wx.Icon(os.path.join(ICON_DIR, "basic_serial.ico"), wx.BITMAP_TYPE_ICO)
+        self.SetIcon(icon)
+        
+        self.refresh_ports()
+        self.port_refresh_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, lambda event: self.refresh_ports(), self.port_refresh_timer)
+        self.port_refresh_timer.Start(2000)
+
+        # baudrate custom input dialog
+        self.baud_choice.Bind(wx.EVT_CHOICE, self.on_baud_choice)
+        self.max_lines_ctrl.Bind(wx.EVT_SPINCTRL, self.on_max_lines_changed)
+        self.received_display.Bind(stc.EVT_STC_UPDATEUI, self.on_stc_update_ui)
+        self.received_display.Bind(stc.EVT_STC_DOUBLECLICK, self.on_stc_double_click)
+        self.connect_btn.Bind(wx.EVT_BUTTON, self.on_connect)
+        self.disconnect_btn.Bind(wx.EVT_BUTTON, self.on_disconnect)
+        self.send_btn.Bind(wx.EVT_BUTTON, self.on_send)
+        self.clear_btn.Bind(wx.EVT_BUTTON, self.on_clear)
+        self.Bind(wx.EVT_CLOSE, self.on_close)
+
+    def create_terminal_tab(self, parent):
+        panel = wx.Panel(parent)
+        root = wx.BoxSizer(wx.VERTICAL)
         
         # ===== Two-column main layout =====
         content_row = wx.BoxSizer(wx.HORIZONTAL)
@@ -218,23 +266,208 @@ class SerialPortFrame(wx.Frame):
 
         root.Add(content_row, 1, wx.ALL | wx.EXPAND, 10)
         panel.SetSizer(root)
+        return panel
 
-        self.worker: Optional[SerialWorker] = None
-        self.refresh_ports()
-        self.port_refresh_timer = wx.Timer(self)
-        self.Bind(wx.EVT_TIMER, lambda event: self.refresh_ports(), self.port_refresh_timer)
-        self.port_refresh_timer.Start(2000)
+    def create_plot_tab(self, parent):
+        panel = wx.Panel(parent)
+        sizer = wx.BoxSizer(wx.VERTICAL)
 
-        # baudrate custom input dialog
-        self.baud_choice.Bind(wx.EVT_CHOICE, self.on_baud_choice)
-        self.max_lines_ctrl.Bind(wx.EVT_SPINCTRL, self.on_max_lines_changed)
-        self.received_display.Bind(stc.EVT_STC_UPDATEUI, self.on_stc_update_ui)
-        self.received_display.Bind(stc.EVT_STC_DOUBLECLICK, self.on_stc_double_click)
-        self.connect_btn.Bind(wx.EVT_BUTTON, self.on_connect)
-        self.disconnect_btn.Bind(wx.EVT_BUTTON, self.on_disconnect)
-        self.send_btn.Bind(wx.EVT_BUTTON, self.on_send)
-        self.clear_btn.Bind(wx.EVT_BUTTON, self.on_clear)
-        self.Bind(wx.EVT_CLOSE, self.on_close)
+        # Plotting attributes
+        self._plot_data = []
+        self._plot_buffer = b""
+        self._plot_max_points = 200
+        self._plot_lock = threading.Lock()
+        self._plotting_enabled = False
+        self._use_fixed_y_axis = False
+        self._y_min = 0.0
+        self._y_max = 5.0
+
+        # Matplotlib Figure
+        self.figure = Figure()
+        self.axes = self.figure.add_subplot(111)
+        self.axes.set_title("Live Data Plot")
+        self.axes.set_xlabel("Time (samples)")
+        self.axes.set_ylabel("Value")
+        self.axes.grid(True)
+        self.axes.margins(x=0) # Set tight margins for the x-axis
+        self.plot_line, = self.axes.plot(self._plot_data) # Removed animated=True
+        self.figure.tight_layout()
+
+        self.canvas = FigureCanvas(panel, -1, self.figure)
+        
+        # Controls
+        top_controls_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        
+        self.enable_plotting_checkbox = wx.CheckBox(panel, label="Enable Plotting")
+        self.enable_plotting_checkbox.SetValue(self._plotting_enabled)
+        self.enable_plotting_checkbox.Bind(wx.EVT_CHECKBOX, self.on_toggle_plotting)
+
+        self.plot_clear_btn = wx.Button(panel, label="Clear Plot")
+        self.plot_clear_btn.Bind(wx.EVT_BUTTON, self.on_clear_plot)
+        
+        max_points_label = wx.StaticText(panel, label="Max Points:")
+        self.max_points_spin = wx.SpinCtrl(panel, value=str(self._plot_max_points), min=10, max=5000)
+        self.max_points_spin.Bind(wx.EVT_SPINCTRL, self.on_max_points_changed)
+
+        top_controls_sizer.Add(self.enable_plotting_checkbox, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 15)
+        top_controls_sizer.Add(self.plot_clear_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
+        top_controls_sizer.Add(max_points_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        top_controls_sizer.Add(self.max_points_spin, 0, wx.ALIGN_CENTER_VERTICAL)
+
+        # Y-Axis controls
+        y_axis_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.fixed_y_axis_checkbox = wx.CheckBox(panel, label="Use Fixed Y-Axis")
+        self.fixed_y_axis_checkbox.Bind(wx.EVT_CHECKBOX, self.on_toggle_fixed_y_axis)
+
+        y_min_label = wx.StaticText(panel, label="Min:")
+        self.y_min_ctrl = wx.TextCtrl(panel, value=str(self._y_min))
+        self.y_min_ctrl.Enable(False)
+        self.y_min_ctrl.Bind(wx.EVT_TEXT, self.on_y_limit_changed)
+
+        y_max_label = wx.StaticText(panel, label="Max:")
+        self.y_max_ctrl = wx.TextCtrl(panel, value=str(self._y_max))
+        self.y_max_ctrl.Enable(False)
+        self.y_max_ctrl.Bind(wx.EVT_TEXT, self.on_y_limit_changed)
+
+        y_axis_sizer.Add(self.fixed_y_axis_checkbox, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
+        y_axis_sizer.Add(y_min_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        y_axis_sizer.Add(self.y_min_ctrl, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+        y_axis_sizer.Add(y_max_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        y_axis_sizer.Add(self.y_max_ctrl, 0, wx.ALIGN_CENTER_VERTICAL)
+
+        sizer.Add(self.canvas, 1, wx.EXPAND | wx.ALL, 5)
+        sizer.Add(top_controls_sizer, 0, wx.ALIGN_LEFT | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+        sizer.Add(y_axis_sizer, 0, wx.ALIGN_LEFT | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+        
+        panel.SetSizer(sizer)
+
+        # Timer for plot updates
+        self.plot_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self.update_plot, self.plot_timer)
+        self.plot_timer.Start(100) # Update plot 10 times per second
+
+        return panel
+
+    def on_toggle_plotting(self, event):
+        self._plotting_enabled = self.enable_plotting_checkbox.GetValue()
+        if not self._plotting_enabled:
+            # When disabling, clear the plot for immediate feedback
+            self.on_clear_plot(None)
+
+    def on_toggle_fixed_y_axis(self, event):
+        self._use_fixed_y_axis = self.fixed_y_axis_checkbox.GetValue()
+        self.y_min_ctrl.Enable(self._use_fixed_y_axis)
+        self.y_max_ctrl.Enable(self._use_fixed_y_axis)
+        # Trigger a plot update to apply the new scaling
+        self.update_plot(None)
+
+    def on_y_limit_changed(self, event):
+        try:
+            self._y_min = float(self.y_min_ctrl.GetValue())
+            self._y_max = float(self.y_max_ctrl.GetValue())
+            if self._use_fixed_y_axis:
+                self.update_plot(None) # Update plot if limits change
+        except ValueError:
+            # Ignore invalid float values for now
+            pass
+
+    def on_max_points_changed(self, event):
+        self._plot_max_points = self.max_points_spin.GetValue()
+        # Trim data if necessary
+        with self._plot_lock:
+            if len(self._plot_data) > self._plot_max_points:
+                self._plot_data = self._plot_data[-self._plot_max_points:]
+
+    def on_clear_plot(self, event):
+        with self._plot_lock:
+            self._plot_data.clear()
+        # Immediately update the plot to show it's empty
+        self.plot_line.set_ydata([])
+        self.plot_line.set_xdata([])
+        self.axes.relim()
+        self.axes.autoscale_view()
+        self.canvas.draw()
+
+    def _parse_plot_data(self, raw_data: bytes):
+        if not self._plotting_enabled:
+            return
+
+        self._plot_buffer += raw_data
+        
+        while True:
+            # Find any valid line ending
+            end_pos = -1
+            for ending in [b'\n', b'\r']:
+                pos = self._plot_buffer.find(ending)
+                if pos != -1:
+                    if end_pos == -1 or pos < end_pos:
+                        end_pos = pos
+            
+            if end_pos == -1:
+                break # No complete line found
+
+            line = self._plot_buffer[:end_pos].strip()
+            self._plot_buffer = self._plot_buffer[end_pos+1:]
+
+            if line:
+                try:
+                    value = int(line)
+                    with self._plot_lock:
+                        self._plot_data.append(value)
+                        if len(self._plot_data) > self._plot_max_points:
+                            self._plot_data.pop(0)
+                except (ValueError, TypeError):
+                    # Ignore lines that are not valid integers
+                    pass
+    
+    def update_plot(self, event):
+        if not self._plotting_enabled:
+            return
+
+        with self._plot_lock:
+            if not self._plot_data:
+                # If there's no data, ensure the plot is empty (e.g., after clearing)
+                if self.plot_line.get_ydata().size > 0:
+                    self.plot_line.set_ydata([])
+                    self.plot_line.set_xdata([])
+                    self.canvas.draw()
+                return
+            
+            y_data = self._plot_data
+            x_data = range(len(y_data))
+
+            self.plot_line.set_ydata(y_data)
+            self.plot_line.set_xdata(x_data)
+            
+            self.axes.relim()
+            if self._use_fixed_y_axis:
+                # Use fixed limits, ensuring min < max
+                min_val = min(self._y_min, self._y_max)
+                max_val = max(self._y_min, self._y_max)
+                if min_val == max_val: # Add padding if limits are identical
+                    min_val -= 1
+                    max_val += 1
+                self.axes.set_ylim(min_val, max_val)
+                self.axes.autoscale_view(scalex=True, scaley=False)
+            else:
+                # Autoscale with headroom and floor
+                if y_data:
+                    min_val = min(y_data)
+                    max_val = max(y_data)
+                    
+                    # Add 10% padding, or a minimum of 1 unit if range is zero
+                    data_range = max_val - min_val
+                    if data_range == 0:
+                        padding = 1
+                    else:
+                        padding = data_range * 0.1
+                    
+                    self.axes.set_ylim(min_val - padding, max_val + padding)
+                
+                self.axes.autoscale_view(scalex=True, scaley=False) # Only autoscale X
+        
+        self.canvas.draw()
+        self.canvas.flush_events()
 
     def _configure_stc(self):
         """Basic configuration for the StyledTextCtrl."""
@@ -401,6 +634,7 @@ class SerialPortFrame(wx.Frame):
             on_data=lambda s: wx.CallAfter(self._append_received, s),
             on_error=lambda e: wx.CallAfter(self._show_error, e),
         )
+        self.worker.on_plot_data = self._parse_plot_data
         self.worker.setup_port(port, baud, bits, parity, stop, flow)
         self.worker.start()
 
@@ -443,8 +677,12 @@ class SerialPortFrame(wx.Frame):
         if self.worker:
             self.worker.stop()
             self.worker = None
-        self.port_refresh_timer.Stop()
-        self.port_refresh_timer = None
+        if self.port_refresh_timer:
+            self.port_refresh_timer.Stop()
+            self.port_refresh_timer = None
+        if self.plot_timer:
+            self.plot_timer.Stop()
+            self.plot_timer = None
         event.Skip()
 
 
