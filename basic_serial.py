@@ -9,6 +9,7 @@ from version import __version_serial__ as __version__
 import wx
 import serial
 from serial.tools import list_ports
+from wx import stc
 
 ICON_DIR = os.path.join(os.path.dirname(__file__), "icons")
 
@@ -113,6 +114,9 @@ class SerialPortFrame(wx.Frame):
         self.SetIcon(icon)
 
         self.next_chunk_starts_with_newline = False
+        self._max_display_lines = 100000
+        self._autoscroll = True
+        self._display_lock = threading.Lock()
         
         # ===== Two-column main layout =====
         content_row = wx.BoxSizer(wx.HORIZONTAL)
@@ -167,10 +171,15 @@ class SerialPortFrame(wx.Frame):
         right_col = wx.BoxSizer(wx.VERTICAL)
 
         right_col.Add(wx.StaticText(panel, label="Received"), 0, wx.BOTTOM, 4)
-        self.received_display = wx.TextCtrl(panel, style=wx.TE_MULTILINE | wx.TE_READONLY)
+        self.received_display = stc.StyledTextCtrl(panel)
+        self._configure_stc()
         right_col.Add(self.received_display, 1, wx.EXPAND | wx.BOTTOM, 8)
 
         clear_row = wx.BoxSizer(wx.HORIZONTAL)
+        clear_row.Add(wx.StaticText(panel, label="Max Lines:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        self.max_lines_ctrl = wx.SpinCtrl(panel, value=str(self._max_display_lines), min=100, max=1000000)
+        self.max_lines_ctrl.SetToolTip("Maximum number of lines to keep in the display.")
+        clear_row.Add(self.max_lines_ctrl, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
         clear_row.AddStretchSpacer(1)
         self.clear_btn = wx.Button(panel, label="Clear")
         clear_row.Add(self.clear_btn, 0)
@@ -186,7 +195,22 @@ class SerialPortFrame(wx.Frame):
         send_row.AddStretchSpacer(1)
         self.send_btn = wx.Button(panel, label="Send")
         send_row.Add(self.send_btn, 0)
-        right_col.Add(send_row, 0, wx.EXPAND)
+        right_col.Add(send_row, 0, wx.EXPAND | wx.BOTTOM, 8)
+
+        # Add 4 more send inputs
+        self.extra_send_inputs = []
+        for i in range(4):
+            send_row_extra = wx.BoxSizer(wx.HORIZONTAL)
+            text_ctrl = wx.TextCtrl(panel)
+            send_btn_extra = wx.Button(panel, label="Send")
+            
+            send_row_extra.Add(text_ctrl, 1, wx.EXPAND | wx.RIGHT, 8)
+            send_row_extra.Add(send_btn_extra, 0)
+            
+            right_col.Add(send_row_extra, 0, wx.EXPAND | wx.BOTTOM, 4)
+            
+            self.extra_send_inputs.append((text_ctrl, send_btn_extra))
+            send_btn_extra.Bind(wx.EVT_BUTTON, lambda event, tc=text_ctrl: self.on_send_extra(event, tc))
 
         # Add both columns to main row
         content_row.Add(left_col, 0, wx.EXPAND | wx.RIGHT, 12)
@@ -203,11 +227,62 @@ class SerialPortFrame(wx.Frame):
 
         # baudrate custom input dialog
         self.baud_choice.Bind(wx.EVT_CHOICE, self.on_baud_choice)
+        self.max_lines_ctrl.Bind(wx.EVT_SPINCTRL, self.on_max_lines_changed)
+        self.received_display.Bind(stc.EVT_STC_UPDATEUI, self.on_stc_update_ui)
+        self.received_display.Bind(stc.EVT_STC_DOUBLECLICK, self.on_stc_double_click)
         self.connect_btn.Bind(wx.EVT_BUTTON, self.on_connect)
         self.disconnect_btn.Bind(wx.EVT_BUTTON, self.on_disconnect)
         self.send_btn.Bind(wx.EVT_BUTTON, self.on_send)
         self.clear_btn.Bind(wx.EVT_BUTTON, self.on_clear)
         self.Bind(wx.EVT_CLOSE, self.on_close)
+
+    def _configure_stc(self):
+        """Basic configuration for the StyledTextCtrl."""
+        self.received_display.SetReadOnly(True)
+        self.received_display.SetWrapMode(stc.STC_WRAP_WORD)
+        
+        # Set font and background color to match a typical terminal
+        font = wx.Font(10, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
+        self.received_display.StyleSetFont(stc.STC_STYLE_DEFAULT, font)
+        self.received_display.StyleSetBackground(stc.STC_STYLE_DEFAULT, wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOW))
+        self.received_display.StyleSetForeground(stc.STC_STYLE_DEFAULT, wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOWTEXT))
+        self.received_display.StyleClearAll() # Apply the default style
+
+        # No line numbers margin
+        self.received_display.SetMarginWidth(0, 0)
+        self.received_display.SetMarginWidth(1, 0)
+
+        # Disable folding margin
+        self.received_display.SetMarginWidth(2, 0)
+
+        # Set caret to be invisible since it's read-only
+        self.received_display.SetCaretStyle(stc.STC_CARETSTYLE_INVISIBLE)
+
+    def on_stc_update_ui(self, event):
+        """Handle UI updates on the StyledTextCtrl, primarily for scrolling."""
+        # If the user scrolls up, disable autoscroll.
+        if event.GetUpdated() & stc.STC_UPDATE_V_SCROLL:
+            scroll_pos = self.received_display.GetScrollPos(wx.VERTICAL)
+            scroll_range = self.received_display.GetScrollRange(wx.VERTICAL)
+            thumb_size = self.received_display.GetScrollThumb(wx.VERTICAL)
+            is_at_bottom = (scroll_pos >= scroll_range - thumb_size - 5)
+
+            if not is_at_bottom:
+                self._autoscroll = False
+        
+        event.Skip()
+
+    def on_stc_double_click(self, event):
+        """Re-enable autoscroll and jump to the bottom on double-click."""
+        self._autoscroll = True
+        # Go to the end to immediately show the latest content
+        self.received_display.GotoPos(self.received_display.GetLength())
+        event.Skip()
+
+    def on_max_lines_changed(self, event) -> None:
+        self._max_display_lines = self.max_lines_ctrl.GetValue()
+        # Immediately trim if the current content exceeds the new limit
+        self._trim_display()
 
     def on_baud_choice(self, event) -> None:
         # if "Custom" is selected, show a dialog to enter custom baud rate
@@ -249,6 +324,20 @@ class SerialPortFrame(wx.Frame):
             if current_port in ports:
                 self.port_choice.SetStringSelection(current_port)
 
+    def _trim_display(self):
+        """Removes lines from the beginning of the display if it exceeds the max line count."""
+        with self._display_lock:
+            line_count = self.received_display.GetLineCount()
+            if line_count > self._max_display_lines:
+                lines_to_remove = line_count - self._max_display_lines
+                
+                # Find the character position to remove up to
+                pos_to_remove = self.received_display.PositionFromLine(lines_to_remove)
+                
+                self.received_display.SetReadOnly(False)
+                self.received_display.DeleteRange(0, pos_to_remove)
+                self.received_display.SetReadOnly(True)
+
     def _append_received(self, text: str) -> None:
         # handle the '\r\n' and '\r' line endings by replacing them with '\n' for consistent display
         text = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -258,10 +347,33 @@ class SerialPortFrame(wx.Frame):
         
         self.next_chunk_starts_with_newline = text.endswith("\n")
         
-        self.received_display.AppendText(text)
+        with self._display_lock:
+            # To avoid flicker, check if the user is scrolled to the bottom
+            autoscroll = self._autoscroll
+
+            self.received_display.SetReadOnly(False)
+            self.received_display.AppendText(text)
+            
+            # Trim the display if it's over the limit
+            # Note: _trim_display acquires its own lock, but since this is the same thread, it's a re-entrant call.
+            # To be cleaner, let's call a non-locking version or handle it inline.
+            line_count = self.received_display.GetLineCount()
+            if line_count > self._max_display_lines:
+                lines_to_remove = line_count - self._max_display_lines
+                pos_to_remove = self.received_display.PositionFromLine(lines_to_remove)
+                self.received_display.DeleteRange(0, pos_to_remove)
+            
+            if autoscroll:
+                self.received_display.GotoPos(self.received_display.GetLength())
+
+            self.received_display.SetReadOnly(True)
 
     def _show_error(self, text: str) -> None:
-        self.received_display.AppendText(f"ERROR: {text}\n")
+        with self._display_lock:
+            self.received_display.SetReadOnly(False)
+            self.received_display.AppendText(f"ERROR: {text}\n")
+            self.received_display.GotoPos(self.received_display.GetLength())
+            self.received_display.SetReadOnly(True)
 
     def on_connect(self, _event) -> None:
         if self.port_choice.GetCount() == 0:
@@ -312,8 +424,20 @@ class SerialPortFrame(wx.Frame):
         else:
             self._show_error("Serial port is not connected")
 
+    def on_send_extra(self, _event, text_ctrl: wx.TextCtrl) -> None:
+        text = text_ctrl.GetValue()
+        if self.send_newline_checkbox.GetValue():
+            text += "\n"
+        if self.worker:
+            self.worker.write_data(text)
+        else:
+            self._show_error("Serial port is not connected")
+
     def on_clear(self, _event) -> None:
-        self.received_display.Clear()
+        with self._display_lock:
+            self.received_display.SetReadOnly(False)
+            self.received_display.ClearAll()
+            self.received_display.SetReadOnly(True)
 
     def on_close(self, event) -> None:
         if self.worker:
