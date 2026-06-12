@@ -16,6 +16,7 @@ import matplotlib
 matplotlib.use('WXAgg')
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_wxagg import FigureCanvasWxAgg as FigureCanvas
+import matplotlib.pyplot as plt
 
 ICON_DIR = os.path.join(os.path.dirname(__file__), "icons")
 
@@ -125,6 +126,12 @@ class SerialPortFrame(wx.Frame):
         self._display_lock = threading.Lock()
         self.worker: Optional[SerialWorker] = None
 
+        # Add a status bar for error messages
+        self.statusBar = self.CreateStatusBar(2)
+        self.statusBar.SetStatusWidths([-1, 120])
+        self.statusBar.SetStatusText("Ready", 0)
+        self.statusBar.SetStatusText("Errors: 0", 1)
+
         root_panel = wx.Panel(self)
         root_sizer = wx.BoxSizer(wx.VERTICAL)
 
@@ -161,6 +168,19 @@ class SerialPortFrame(wx.Frame):
         self.send_btn.Bind(wx.EVT_BUTTON, self.on_send)
         self.clear_btn.Bind(wx.EVT_BUTTON, self.on_clear)
         self.Bind(wx.EVT_CLOSE, self.on_close)
+
+        # Defer the initial plot layout until the frame is fully sized and shown
+        self.Bind(wx.EVT_SHOW, self.on_show_frame, self)
+
+    def on_show_frame(self, event):
+        if event.IsShown():
+            # Call tight_layout once after the frame is shown to ensure correct initial sizing
+            # Add some padding to prevent widgets from overlapping the x-axis.
+            self.figure.subplots_adjust(bottom=0.15)
+            self.figure.tight_layout(rect=[0, 0.05, 1, 1])
+            # Unbind the event so it doesn't fire again
+            self.Unbind(wx.EVT_SHOW, self)
+        event.Skip()
 
     def create_terminal_tab(self, parent):
         panel = wx.Panel(parent)
@@ -273,7 +293,7 @@ class SerialPortFrame(wx.Frame):
         sizer = wx.BoxSizer(wx.VERTICAL)
 
         # Plotting attributes
-        self._plot_data = []
+        self._plot_data = [] # List of lists for multi-line plots
         self._plot_buffer = b""
         self._plot_max_points = 200
         self._plot_lock = threading.Lock()
@@ -281,23 +301,35 @@ class SerialPortFrame(wx.Frame):
         self._use_fixed_y_axis = False
         self._y_min = 0.0
         self._y_max = 5.0
+        self._plot_lines = [] # Store matplotlib line objects
+        self._plot_format_string = "%d"
+        self._plot_error_count = 0
+        # Define a persistent color cycle
+        self._plot_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
 
         # Matplotlib Figure
         self.figure = Figure()
         self.axes = self.figure.add_subplot(111)
+        # Set a persistent color cycle on the axes
+        self.axes.set_prop_cycle(color=self._plot_colors)
         self.axes.set_title("Live Data Plot")
         self.axes.set_xlabel("Time (samples)")
         self.axes.set_ylabel("Value")
         self.axes.grid(True)
         self.axes.margins(x=0) # Set tight margins for the x-axis
-        self.plot_line, = self.axes.plot(self._plot_data) # Removed animated=True
-        self.figure.tight_layout()
+        # self.plot_line, = self.axes.plot(self._plot_data) # Removed, will be managed dynamically
+        # self.figure.tight_layout() # Defer this call until the frame is shown
 
         self.canvas = FigureCanvas(panel, -1, self.figure)
+        self.canvas.SetMinSize(wx.Size(-1, 200)) # Set a minimum height of 200 pixels
         
         # Controls
-        top_controls_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        controls_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
+        # Left side controls (plotting, clear, points)
+        left_controls_sizer = wx.BoxSizer(wx.VERTICAL)
+        
+        top_controls_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.enable_plotting_checkbox = wx.CheckBox(panel, label="Enable Plotting")
         self.enable_plotting_checkbox.SetValue(self._plotting_enabled)
         self.enable_plotting_checkbox.Bind(wx.EVT_CHECKBOX, self.on_toggle_plotting)
@@ -320,12 +352,12 @@ class SerialPortFrame(wx.Frame):
         self.fixed_y_axis_checkbox.Bind(wx.EVT_CHECKBOX, self.on_toggle_fixed_y_axis)
 
         y_min_label = wx.StaticText(panel, label="Min:")
-        self.y_min_ctrl = wx.TextCtrl(panel, value=str(self._y_min))
+        self.y_min_ctrl = wx.TextCtrl(panel, value=str(self._y_min), size=(50,-1))
         self.y_min_ctrl.Enable(False)
         self.y_min_ctrl.Bind(wx.EVT_TEXT, self.on_y_limit_changed)
 
         y_max_label = wx.StaticText(panel, label="Max:")
-        self.y_max_ctrl = wx.TextCtrl(panel, value=str(self._y_max))
+        self.y_max_ctrl = wx.TextCtrl(panel, value=str(self._y_max), size=(50,-1))
         self.y_max_ctrl.Enable(False)
         self.y_max_ctrl.Bind(wx.EVT_TEXT, self.on_y_limit_changed)
 
@@ -335,9 +367,31 @@ class SerialPortFrame(wx.Frame):
         y_axis_sizer.Add(y_max_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
         y_axis_sizer.Add(self.y_max_ctrl, 0, wx.ALIGN_CENTER_VERTICAL)
 
+        # Format string control
+        format_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        format_label = wx.StaticText(panel, label="Data Format:")
+        self.format_ctrl = wx.TextCtrl(panel, value=self._plot_format_string)
+        self.format_ctrl.SetToolTip("C-style format string (e.g., 'A:%d, B:%f'). Delimiters: space, ',', ':'. Dataset ends with newline or ';'.")
+        self.format_ctrl.Bind(wx.EVT_TEXT, self.on_format_changed)
+        format_sizer.Add(format_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        format_sizer.Add(self.format_ctrl, 1, wx.EXPAND)
+
+        left_controls_sizer.Add(top_controls_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
+        left_controls_sizer.Add(y_axis_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
+        left_controls_sizer.Add(format_sizer, 0, wx.EXPAND)
+
+        # Right side controls (plot line selection)
+        right_controls_sizer = wx.BoxSizer(wx.VERTICAL)
+        self.plot_lines_checklist = wx.CheckListBox(panel, choices=[])
+        self.plot_lines_checklist.SetToolTip("Select which data series to plot.")
+        right_controls_sizer.Add(wx.StaticText(panel, label="Plot Series:"), 0, wx.BOTTOM, 4)
+        right_controls_sizer.Add(self.plot_lines_checklist, 1, wx.EXPAND)
+
+        controls_sizer.Add(left_controls_sizer, 1, wx.EXPAND | wx.RIGHT, 10)
+        controls_sizer.Add(right_controls_sizer, 0, wx.EXPAND | wx.LEFT, 10)
+
         sizer.Add(self.canvas, 1, wx.EXPAND | wx.ALL, 5)
-        sizer.Add(top_controls_sizer, 0, wx.ALIGN_LEFT | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
-        sizer.Add(y_axis_sizer, 0, wx.ALIGN_LEFT | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+        sizer.Add(controls_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
         
         panel.SetSizer(sizer)
 
@@ -348,11 +402,21 @@ class SerialPortFrame(wx.Frame):
 
         return panel
 
+    def on_format_changed(self, event):
+        self._plot_format_string = self.format_ctrl.GetValue()
+        # Clear data as the format has changed, and force a full reset of lines
+        self.on_clear_plot(event, full_reset=True)
+
     def on_toggle_plotting(self, event):
         self._plotting_enabled = self.enable_plotting_checkbox.GetValue()
         if not self._plotting_enabled:
-            # When disabling, clear the plot for immediate feedback
-            self.on_clear_plot(None)
+            # When disabling, clear the plot for immediate feedback but don't reset lines
+            self.on_clear_plot(event, full_reset=False)
+        else:
+            # Reset error count when enabling
+            self._plot_error_count = 0
+            self.statusBar.SetStatusText("Errors: 0", 1)
+            self.statusBar.SetStatusText("Plotting enabled", 0)
 
     def on_toggle_fixed_y_axis(self, event):
         self._use_fixed_y_axis = self.fixed_y_axis_checkbox.GetValue()
@@ -375,17 +439,35 @@ class SerialPortFrame(wx.Frame):
         self._plot_max_points = self.max_points_spin.GetValue()
         # Trim data if necessary
         with self._plot_lock:
-            if len(self._plot_data) > self._plot_max_points:
-                self._plot_data = self._plot_data[-self._plot_max_points:]
+            for data_series in self._plot_data:
+                if len(data_series) > self._plot_max_points:
+                    # Trim from the left
+                    del data_series[:len(data_series) - self._plot_max_points]
 
-    def on_clear_plot(self, event):
+    def on_clear_plot(self, event, full_reset=False):
         with self._plot_lock:
             self._plot_data.clear()
-        # Immediately update the plot to show it's empty
-        self.plot_line.set_ydata([])
-        self.plot_line.set_xdata([])
+            self._plot_buffer = b"" # Also clear the byte buffer
+            
+            # If a full reset is requested (e.g., format change), remove the lines completely.
+            if full_reset:
+                self.plot_lines_checklist.Set([])
+                for line in self._plot_lines:
+                    line.remove()
+                self._plot_lines.clear()
+            else:
+                # Otherwise, just clear the data from existing lines to preserve colors.
+                for line in self._plot_lines:
+                    line.set_data([], [])
+
+        # Remove legend if it exists
+        if self.axes.get_legend():
+            self.axes.get_legend().remove()
+
         self.axes.relim()
         self.axes.autoscale_view()
+        # Also reset the x-axis limit on clear
+        self.axes.set_xlim(0, self._plot_max_points)
         self.canvas.draw()
 
     def _parse_plot_data(self, raw_data: bytes):
@@ -395,49 +477,122 @@ class SerialPortFrame(wx.Frame):
         self._plot_buffer += raw_data
         
         while True:
-            # Find any valid line ending
+            # Find any valid dataset delimiter
             end_pos = -1
-            for ending in [b'\n', b'\r']:
+            for ending in [b'\n', b'\r', b';']:
                 pos = self._plot_buffer.find(ending)
                 if pos != -1:
                     if end_pos == -1 or pos < end_pos:
                         end_pos = pos
             
             if end_pos == -1:
-                break # No complete line found
+                break # No complete dataset found
 
-            line = self._plot_buffer[:end_pos].strip()
+            line_bytes = self._plot_buffer[:end_pos].strip()
             self._plot_buffer = self._plot_buffer[end_pos+1:]
 
-            if line:
+            if line_bytes:
                 try:
-                    value = int(line)
+                    # Replace data delimiters with a standard one (space) for sscanf
+                    line_str = line_bytes.decode(errors='ignore')
+                    for delim in [',', ':']:
+                        line_str = line_str.replace(delim, ' ')
+                    
+                    # Use a simple sscanf-like parser
+                    values = []
+                    parts = self._plot_format_string.split()
+                    data_parts = line_str.split()
+                    
+                    if len(parts) > len(data_parts):
+                        raise ValueError("Not enough data parts for format")
+
+                    p_idx, d_idx = 0, 0
+                    while p_idx < len(parts) and d_idx < len(data_parts):
+                        if '%' in parts[p_idx]:
+                            try:
+                                if 'd' in parts[p_idx] or 'i' in parts[p_idx]:
+                                    values.append(int(data_parts[d_idx]))
+                                elif 'f' in parts[p_idx] or 'g' in parts[p_idx] or 'e' in parts[p_idx]:
+                                    values.append(float(data_parts[d_idx]))
+                                else: # Just a literal match
+                                    if parts[p_idx] != data_parts[d_idx]:
+                                        raise ValueError("Literal mismatch")
+                                d_idx += 1
+                            except (ValueError, IndexError):
+                                d_idx +=1 # Skip non-matching data part
+                                continue
+                        else: # Literal text
+                            if parts[p_idx] == data_parts[d_idx]:
+                                d_idx += 1
+                        p_idx += 1
+
+                    if not values:
+                        raise ValueError("No values parsed")
+
                     with self._plot_lock:
-                        self._plot_data.append(value)
-                        if len(self._plot_data) > self._plot_max_points:
-                            self._plot_data.pop(0)
-                except (ValueError, TypeError):
-                    # Ignore lines that are not valid integers
-                    pass
+                        num_series = len(values)
+                        # Initialize data lists and plot lines if this is the first data or format changed
+                        if num_series != len(self._plot_data):
+                            self._plot_data = [[] for _ in range(num_series)]
+                            wx.CallAfter(self._update_plot_checklist, num_series)
+
+                        for i in range(num_series):
+                            self._plot_data[i].append(values[i])
+                            if len(self._plot_data[i]) > self._plot_max_points:
+                                self._plot_data[i].pop(0)
+
+                except Exception as e:
+                    self._plot_error_count += 1
+                    wx.CallAfter(self.statusBar.SetStatusText, f"Parse error: {e}", 0)
+                    wx.CallAfter(self.statusBar.SetStatusText, f"Errors: {self._plot_error_count}", 1)
     
+    def _update_plot_checklist(self, num_series):
+        """Update the checklist box for plot series. Must be called from main thread."""
+        choices = [f"Series {i+1}" for i in range(num_series)]
+        self.plot_lines_checklist.Set(choices)
+        # Check all by default
+        for i in range(num_series):
+            self.plot_lines_checklist.Check(i)
+
     def update_plot(self, event):
         if not self._plotting_enabled:
             return
 
         with self._plot_lock:
-            if not self._plot_data:
-                # If there's no data, ensure the plot is empty (e.g., after clearing)
-                if self.plot_line.get_ydata().size > 0:
-                    self.plot_line.set_ydata([])
-                    self.plot_line.set_xdata([])
+            if not self._plot_data or not any(self._plot_data):
+                if self._plot_lines:
+                    for line in self._plot_lines:
+                        line.set_data([], [])
+                    if self.axes.get_legend():
+                        self.axes.get_legend().remove()
                     self.canvas.draw()
                 return
             
-            y_data = self._plot_data
-            x_data = range(len(y_data))
+            # Ensure we have line objects for each data series
+            num_series = len(self._plot_data)
+            while len(self._plot_lines) < num_series:
+                series_index = len(self._plot_lines)
+                # The color is now handled automatically by the axes' property cycle
+                line, = self.axes.plot([], [], label=f"Series {series_index + 1}")
+                self._plot_lines.append(line)
+            
+            # Hide lines beyond the current number of series
+            for i in range(num_series, len(self._plot_lines)):
+                self._plot_lines[i].set_data([], [])
 
-            self.plot_line.set_ydata(y_data)
-            self.plot_line.set_xdata(x_data)
+            checked_items = self.plot_lines_checklist.GetCheckedItems()
+            active_y_data = []
+
+            for i in range(num_series):
+                line = self._plot_lines[i]
+                if i in checked_items:
+                    y_data = self._plot_data[i]
+                    x_data = range(len(y_data))
+                    line.set_data(x_data, y_data)
+                    if y_data:
+                        active_y_data.extend(y_data)
+                else:
+                    line.set_data([], [])
             
             self.axes.relim()
             if self._use_fixed_y_axis:
@@ -450,10 +605,10 @@ class SerialPortFrame(wx.Frame):
                 self.axes.set_ylim(min_val, max_val)
                 self.axes.autoscale_view(scalex=True, scaley=False)
             else:
-                # Autoscale with headroom and floor
-                if y_data:
-                    min_val = min(y_data)
-                    max_val = max(y_data)
+                # Autoscale with headroom and floor based on active data
+                if active_y_data:
+                    min_val = min(active_y_data)
+                    max_val = max(active_y_data)
                     
                     # Add 10% padding, or a minimum of 1 unit if range is zero
                     data_range = max_val - min_val
@@ -466,6 +621,14 @@ class SerialPortFrame(wx.Frame):
                 
                 self.axes.autoscale_view(scalex=True, scaley=False) # Only autoscale X
         
+        # Set a fixed x-axis range from 0 to max_points to prevent resizing.
+        self.axes.set_xlim(0, self._plot_max_points)
+
+        # Place legend inside the plot on the upper right, with transparency
+        self.axes.legend(loc='upper right', framealpha=0.5)
+        # Adjust layout to use the full area, leaving space at the bottom.
+        self.figure.tight_layout(rect=[0, 0.05, 1, 1])
+
         self.canvas.draw()
         self.canvas.flush_events()
 
